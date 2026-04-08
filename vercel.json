@@ -3,7 +3,6 @@
   "buildCommand": "pnpm build",
   "installCommand": "pnpm install --frozen-lockfile",
   "outputDirectory": ".next",
-  "nodeVersion": "20.x",
   "functions": {
     "app/api/agents/ceo/route.ts": {
       "maxDuration": 60
