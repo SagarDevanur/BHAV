@@ -60,8 +60,17 @@ export const jobInputSchemas: Record<AgentName, z.ZodTypeAny> = {
   }),
 
   cfo: z.object({
-    companyId:     uuid,
-    financialData: jsonObject.optional(),
+    companyId:           uuid,
+    // Company fields passed by the master agent so the CFO worker has full
+    // context without needing to re-fetch from Supabase.
+    name:                z.string().optional(),
+    sector:              z.string().nullable().optional(),
+    sub_sector:          z.string().nullable().optional(),
+    estimated_revenue:   z.string().nullable().optional(),
+    estimated_valuation: z.string().nullable().optional(),
+    last_round:          z.string().nullable().optional(),
+    blurb:               z.string().nullable().optional(),
+    financialData:       jsonObject.optional(),
   }),
 
   master: z.object({

@@ -205,11 +205,15 @@ export async function runCeoAgent(input: CeoInput): Promise<CeoRunResult> {
     }
 
     // ------------------------------------------------------------------
-    // 3. Parse directive — hard fail if Claude returns non-JSON
+    // 3. Parse directive — strip markdown code fences before parsing
     // ------------------------------------------------------------------
     let directive: CeoDirective;
     try {
-      directive = JSON.parse(responseText) as CeoDirective;
+      const cleanJson = responseText
+        .replace(/```json\n?/g, "")
+        .replace(/```\n?/g, "")
+        .trim();
+      directive = JSON.parse(cleanJson) as CeoDirective;
     } catch {
       throw new Error(
         `CEO agent received non-JSON from ${modelUsed}: ${responseText.slice(0, 300)}`

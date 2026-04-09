@@ -7,6 +7,15 @@
     "app/api/agents/ceo/route.ts": {
       "maxDuration": 60
     },
+    "app/api/agents/loi/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/agents/outreach/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/agents/scoring/route.ts": {
+      "maxDuration": 300
+    },
     "app/api/agents/[taskId]/retry/route.ts": {
       "maxDuration": 30
     },

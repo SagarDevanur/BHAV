@@ -78,6 +78,16 @@ export const config = {
   app: {
     url: process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000",
   },
+  googleNews: {
+    // SERVER ONLY — optional. When absent the sourcing agent skips the news step.
+    // Use newsapi.org → Get API Key to obtain a key.
+    apiKey: process.env.GOOGLE_NEWS_API_KEY,
+  },
+  hunter: {
+    // SERVER ONLY — optional. When absent the contact agent skips the Hunter.io step.
+    // Get a free key from: hunter.io → Sign Up → API
+    apiKey: process.env.HUNTER_API_KEY,
+  },
 } as const;
 
 export type Config = typeof config;
