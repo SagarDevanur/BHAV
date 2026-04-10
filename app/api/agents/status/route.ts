@@ -1,5 +1,11 @@
 // GET /api/agents/status — returns how many agent_tasks are currently running.
 // Polled by AgentStatusIndicator every 10 s to drive the live status dot.
+//
+// force-dynamic prevents Next.js from attempting static pre-rendering at build
+// time. This route reads auth state and hits Supabase on every request, so it
+// must always be treated as dynamic.
+export const dynamic = "force-dynamic";
+
 import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
