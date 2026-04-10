@@ -6,7 +6,6 @@
 //   2. Insert a row into agent_tasks (status = "queued") and get its UUID
 //   3. Add the job to BullMQ with that UUID as taskId
 //   4. Return the taskId so callers can poll for status
-import "server-only";
 import { agentQueue, AGENT_QUEUE_NAME } from "./queue";
 import { JOB_NAMES, jobInputSchemas, MAX_RETRIES } from "./jobs";
 import { createAdminClient } from "@/lib/supabase/admin";

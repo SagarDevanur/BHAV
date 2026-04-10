@@ -1,6 +1,5 @@
 // Server-side Supabase client. Use in Server Components and API routes only.
 // This file must never be imported from Client Components.
-import "server-only";
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import { config } from "@/lib/config";

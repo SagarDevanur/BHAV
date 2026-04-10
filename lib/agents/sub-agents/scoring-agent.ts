@@ -19,7 +19,6 @@
  *   - Sets companies.despac_score and companies.status per company
  *   - Writes one agent_results row per company (result_type = "score")
  */
-import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { config } from "@/lib/config";

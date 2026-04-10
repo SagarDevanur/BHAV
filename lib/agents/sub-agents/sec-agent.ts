@@ -14,7 +14,6 @@
  * Input:  AgentInput — companyId at top level, optional deal params in payload.dealParameters
  * Output: SecRunResult
  */
-import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { config } from "@/lib/config";

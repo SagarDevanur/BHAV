@@ -19,7 +19,6 @@
  *   - Updates the master agent_tasks row (running → completed | failed)
  *   - dispatchAgentJob() creates child agent_tasks rows for each dispatched job
  */
-import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { config } from "@/lib/config";

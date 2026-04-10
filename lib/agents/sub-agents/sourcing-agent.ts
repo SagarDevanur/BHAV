@@ -14,7 +14,6 @@
  * Input:  AgentInput — payload.sector (optional), payload.searchCriteria (optional)
  * Output: SourcingRunResult
  */
-import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { config } from "@/lib/config";

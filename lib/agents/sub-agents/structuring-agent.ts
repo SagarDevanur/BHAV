@@ -19,7 +19,6 @@
  * Input:  AgentInput — companyId at top level, optional co-founder preferences in payload
  * Output: StructuringRunResult
  */
-import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { config } from "@/lib/config";

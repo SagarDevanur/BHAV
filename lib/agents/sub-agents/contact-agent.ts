@@ -16,7 +16,6 @@
  * Input:  AgentInput — payload.companyName, payload.website, companyId at top level
  * Output: ContactRunResult
  */
-import "server-only";
 import axios from "axios";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";

@@ -17,7 +17,6 @@
  * Input:  AgentInput — companyId at top level, optional overrides in payload
  * Output: NarrativeRunResult
  */
-import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { config } from "@/lib/config";

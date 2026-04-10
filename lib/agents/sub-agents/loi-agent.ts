@@ -16,7 +16,6 @@
  * Input:  AgentInput — companyId at top level, deal terms in payload
  * Output: LoiRunResult
  */
-import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { config } from "@/lib/config";

@@ -19,7 +19,6 @@
  * Input:  AgentInput — companyId at top level, optional deal params in payload
  * Output: PipeRunResult
  */
-import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { config } from "@/lib/config";

@@ -9,7 +9,6 @@
  *   - Updates companies.despac_score in Supabase
  *   - Writes a scored result row to agent_results (result_type = "score")
  */
-import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { config } from "@/lib/config";

@@ -25,7 +25,6 @@
  * Input:  AgentInput — companyId at top level
  * Output: OptimizationRunResult
  */
-import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { config } from "@/lib/config";

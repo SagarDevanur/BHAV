@@ -7,7 +7,6 @@
  * Runs inline (not via BullMQ) so the dashboard gets an immediate structured
  * response showing exactly what was dispatched and why.
  */
-import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { config } from "@/lib/config";
