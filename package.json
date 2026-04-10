@@ -9,6 +9,7 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "worker": "tsx workers/agent-worker.ts",
+    "workers": "tsx workers/agent-worker.ts",
     "seed": "tsx scripts/seed-companies.ts"
   },
   "dependencies": {
