@@ -20,7 +20,6 @@
  *   - dispatchAgentJob() creates child agent_tasks rows for each dispatched job
  */
 import Anthropic from "@anthropic-ai/sdk";
-import OpenAI from "openai";
 import { config } from "@/lib/config";
 import { AGENT_PROMPTS } from "./prompts";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -40,18 +39,6 @@ const BATCH_LIMIT = 100;
 // ---------------------------------------------------------------------------
 
 const anthropic = new Anthropic({ apiKey: config.anthropic.apiKey });
-
-let _openai: OpenAI | null = null;
-function getOpenAiClient(): OpenAI {
-  if (!config.openai.apiKey) {
-    throw new Error(
-      "OpenAI fallback unavailable: OPENAI_API_KEY is not set. " +
-        "Set it in .env.local or fix the Anthropic API error above."
-    );
-  }
-  if (!_openai) _openai = new OpenAI({ apiKey: config.openai.apiKey });
-  return _openai;
-}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -133,61 +120,28 @@ async function callLlmForPlan(
     priority:        "normal",
   });
 
-  try {
-    const message = await anthropic.messages.create({
-      model:      config.anthropic.model,
-      max_tokens: 1024,
-      system:     AGENT_PROMPTS.master,
-      messages:   [{ role: "user", content: userMessage }],
-    });
+  const message = await anthropic.messages.create({
+    model:      config.anthropic.model,
+    max_tokens: 1024,
+    system:     AGENT_PROMPTS.master,
+    messages:   [{ role: "user", content: userMessage }],
+  });
 
-    if (message.content[0].type !== "text") {
-      throw new Error("Claude returned a non-text content block");
-    }
-
-    let executionPlan = message.content[0].text;
-
-    // Claude returns JSON — extract the executionPlan field if possible.
-    try {
-      const parsed = JSON.parse(executionPlan) as Record<string, unknown>;
-      executionPlan = String(parsed.executionPlan ?? executionPlan);
-    } catch {
-      // If it's not JSON just use the raw text as the plan.
-    }
-
-    return { executionPlan, modelUsed: config.anthropic.model };
-  } catch (claudeErr) {
-    console.error("[Master agent] Anthropic API error:", claudeErr);
-
-    if (!config.openai.apiKey) throw claudeErr;
-
-    const claudeMessage =
-      claudeErr instanceof Error ? claudeErr.message : String(claudeErr);
-
-    const completion = await getOpenAiClient().chat.completions.create({
-      model:           config.openai.model,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: AGENT_PROMPTS.master },
-        { role: "user",   content: userMessage },
-      ],
-    });
-
-    const responseText = completion.choices[0]?.message?.content ?? "{}";
-    let executionPlan = responseText;
-
-    try {
-      const parsed = JSON.parse(responseText) as Record<string, unknown>;
-      executionPlan = String(parsed.executionPlan ?? responseText);
-    } catch {
-      // use raw text
-    }
-
-    return {
-      executionPlan,
-      modelUsed: `${config.openai.model} (fallback — Claude error: ${claudeMessage})`,
-    };
+  if (message.content[0].type !== "text") {
+    throw new Error("Claude returned a non-text content block");
   }
+
+  let executionPlan = message.content[0].text;
+
+  // Claude returns JSON — extract the executionPlan field if possible.
+  try {
+    const parsed = JSON.parse(executionPlan) as Record<string, unknown>;
+    executionPlan = String(parsed.executionPlan ?? executionPlan);
+  } catch {
+    // If it's not JSON just use the raw text as the plan.
+  }
+
+  return { executionPlan, modelUsed: config.anthropic.model };
 }
 
 // ---------------------------------------------------------------------------

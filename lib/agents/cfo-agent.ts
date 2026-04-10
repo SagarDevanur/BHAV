@@ -10,7 +10,6 @@
  *   - Writes a scored result row to agent_results (result_type = "score")
  */
 import Anthropic from "@anthropic-ai/sdk";
-import OpenAI from "openai";
 import { config } from "@/lib/config";
 import { AGENT_PROMPTS } from "./prompts";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -21,20 +20,6 @@ import type { AgentInput } from "@/types/agents";
 // ---------------------------------------------------------------------------
 
 const anthropic = new Anthropic({ apiKey: config.anthropic.apiKey });
-
-let _openai: OpenAI | null = null;
-function getOpenAiClient(): OpenAI {
-  if (!config.openai.apiKey) {
-    throw new Error(
-      "OpenAI fallback unavailable: OPENAI_API_KEY is not set. " +
-        "Set it in .env.local or fix the Anthropic API error above."
-    );
-  }
-  if (!_openai) {
-    _openai = new OpenAI({ apiKey: config.openai.apiKey });
-  }
-  return _openai;
-}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -204,7 +189,7 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
 
   try {
     // ------------------------------------------------------------------
-    // 2. Call LLM — Claude primary, OpenAI fallback
+    // 2. Call Claude
     // ------------------------------------------------------------------
     const userMessage = JSON.stringify({
       companyId,
@@ -218,43 +203,19 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
       approvedByHuman: input.approvedByHuman ?? false,
     });
 
-    let responseText: string;
-    let modelUsed: string;
+    const message = await anthropic.messages.create({
+      model: config.anthropic.model,
+      max_tokens: 1024,
+      system: AGENT_PROMPTS.cfo,
+      messages: [{ role: "user", content: userMessage }],
+    });
 
-    try {
-      const message = await anthropic.messages.create({
-        model: config.anthropic.model,
-        max_tokens: 1024,
-        system: AGENT_PROMPTS.cfo,
-        messages: [{ role: "user", content: userMessage }],
-      });
-
-      if (message.content[0].type !== "text") {
-        throw new Error("Claude returned a non-text content block");
-      }
-
-      responseText = message.content[0].text;
-      modelUsed = config.anthropic.model;
-    } catch (claudeErr) {
-      console.error("[CFO agent] Anthropic API error:", claudeErr);
-
-      if (!config.openai.apiKey) throw claudeErr;
-
-      const claudeMessage =
-        claudeErr instanceof Error ? claudeErr.message : String(claudeErr);
-
-      const completion = await getOpenAiClient().chat.completions.create({
-        model: config.openai.model,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: AGENT_PROMPTS.cfo },
-          { role: "user", content: userMessage },
-        ],
-      });
-
-      responseText = completion.choices[0]?.message?.content ?? "{}";
-      modelUsed = `${config.openai.model} (fallback — Claude error: ${claudeMessage})`;
+    if (message.content[0].type !== "text") {
+      throw new Error("Claude returned a non-text content block");
     }
+
+    const responseText = message.content[0].text;
+    const modelUsed = config.anthropic.model;
 
     // ------------------------------------------------------------------
     // 3. Parse and validate
