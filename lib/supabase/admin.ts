@@ -1,7 +1,8 @@
 // Admin Supabase client — uses the service role key, bypasses Row Level Security.
 // NEVER import this from any Client Component or any file that could be bundled
 // for the browser. Server-only: API routes, agent workers, migration scripts.
-import "server-only";
+// The 'server-only' package is intentionally omitted: this file is also imported
+// by the Railway worker (plain Node.js) which has no Next.js runtime available.
 import { createClient } from "@supabase/supabase-js";
 import { config } from "@/lib/config";
 

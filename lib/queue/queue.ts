@@ -1,6 +1,7 @@
 // BullMQ queue connected to Upstash Redis over TLS.
-// This module is server-only — never import from client components.
-import "server-only";
+// This module is server-only by design — never import from client components.
+// The 'server-only' package is intentionally omitted: this file is also imported
+// by the Railway worker (plain Node.js) which has no Next.js runtime available.
 import { Queue } from "bullmq";
 import { config } from "@/lib/config";
 import type { AgentInput } from "@/types/agents";
