@@ -1,5 +1,11 @@
 // BullMQ worker — runs on Railway, processes all agent jobs from the queue.
 // This is the only place where agent functions are invoked.
+//
+// validateWorkerConfig() must be the very first thing called so that missing
+// environment variables surface as a clear error before any agent module loads.
+import { validateWorkerConfig } from "@/lib/worker-config";
+validateWorkerConfig();
+
 import { Worker } from "bullmq";
 import { AGENT_QUEUE_NAME } from "@/lib/queue/queue";
 import { runCeoAgent } from "@/lib/agents/ceo-agent";
