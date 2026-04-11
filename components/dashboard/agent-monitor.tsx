@@ -5,79 +5,60 @@ import type { AgentTask, AgentTaskStatus } from "@/types/database";
 import type { AgentName } from "@/types/agents";
 import type { TasksResponse, TasksSummary } from "@/app/api/agents/tasks/route";
 
-// ─── Badge config ─────────────────────────────────────────────────────────────
+// ─── Config ───────────────────────────────────────────────────────────────────
 
-const AGENT_BADGE: Record<AgentName, string> = {
-  ceo:          "bg-red-100 text-red-700",
-  cfo:          "bg-teal-100 text-teal-700",
-  master:       "bg-purple-100 text-purple-700",
-  sourcing:     "bg-blue-100 text-blue-700",
-  contact:      "bg-blue-100 text-blue-700",
-  scoring:      "bg-blue-100 text-blue-700",
-  loi:          "bg-blue-100 text-blue-700",
-  outreach:     "bg-blue-100 text-blue-700",
-  sec:          "bg-blue-100 text-blue-700",
-  narrative:    "bg-blue-100 text-blue-700",
-  structuring:  "bg-blue-100 text-blue-700",
-  optimization: "bg-blue-100 text-blue-700",
-  pipe:         "bg-blue-100 text-blue-700",
-  redemption:   "bg-blue-100 text-blue-700",
+const AGENT_BADGE: Record<AgentName, { bg: string; text: string }> = {
+  ceo:          { bg: "bg-orange-50",  text: "text-orange-700" },
+  cfo:          { bg: "bg-teal-50",    text: "text-teal-700" },
+  master:       { bg: "bg-purple-50",  text: "text-purple-700" },
+  sourcing:     { bg: "bg-blue-50",    text: "text-blue-700" },
+  contact:      { bg: "bg-blue-50",    text: "text-blue-700" },
+  scoring:      { bg: "bg-blue-50",    text: "text-blue-700" },
+  loi:          { bg: "bg-blue-50",    text: "text-blue-700" },
+  outreach:     { bg: "bg-blue-50",    text: "text-blue-700" },
+  sec:          { bg: "bg-blue-50",    text: "text-blue-700" },
+  narrative:    { bg: "bg-blue-50",    text: "text-blue-700" },
+  structuring:  { bg: "bg-blue-50",    text: "text-blue-700" },
+  optimization: { bg: "bg-blue-50",    text: "text-blue-700" },
+  pipe:         { bg: "bg-blue-50",    text: "text-blue-700" },
+  redemption:   { bg: "bg-blue-50",    text: "text-blue-700" },
 };
 
-const STATUS_BADGE: Record<AgentTaskStatus, { label: string; cls: string }> = {
-  queued:    { label: "Queued",    cls: "bg-gray-100 text-gray-600" },
-  running:   { label: "Running",   cls: "bg-amber-100 text-amber-700" },
-  completed: { label: "Completed", cls: "bg-green-100 text-green-700" },
-  failed:    { label: "Failed",    cls: "bg-red-100 text-red-700" },
+const STATUS_BADGE: Record<AgentTaskStatus, { bg: string; text: string; dot: string; label: string }> = {
+  queued:    { bg: "bg-slate-100",   text: "text-slate-600",   dot: "bg-slate-400",   label: "Queued" },
+  running:   { bg: "bg-blue-50",    text: "text-blue-700",    dot: "bg-blue-500",    label: "Running" },
+  completed: { bg: "bg-emerald-50", text: "text-emerald-700", dot: "bg-emerald-500", label: "Completed" },
+  failed:    { bg: "bg-red-50",     text: "text-red-700",     dot: "bg-red-500",     label: "Failed" },
 };
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Produces a short human-readable summary of the task's input payload.
- * Displayed in the activity feed to give context without expanding the row.
- */
-function summariseInput(
-  agentName: AgentName,
-  input: Record<string, unknown>
-): string {
-  // CEO: show the founder's prompt, truncated
+function summariseInput(agentName: AgentName, input: Record<string, unknown>): string {
   if (agentName === "ceo" && typeof input.prompt === "string") {
     const p = input.prompt.trim();
-    return p.length > 90 ? p.slice(0, 90) + "…" : p;
+    return p.length > 100 ? p.slice(0, 100) + "…" : p;
   }
-
-  // Company-scoped agents: prefer company name from nested object, fall back to UUID
   if (typeof input.companyId === "string") {
     const company = input.company as Record<string, unknown> | undefined;
     const name = typeof company?.name === "string" ? company.name : null;
-    return name ? `Company: ${name}` : `Company: ${input.companyId.slice(0, 8)}…`;
+    return name ? `Company: ${name}` : `Company ID: ${input.companyId.slice(0, 8)}…`;
   }
-
-  // Master agent: show action from CEO output
   if (agentName === "master") {
-    const ceoOut = input.ceoOutput as Record<string, unknown> | undefined;
-    if (typeof ceoOut?.action === "string") return `Action: ${ceoOut.action}`;
+    const out = input.ceoOutput as Record<string, unknown> | undefined;
+    if (typeof out?.action === "string") return `Action: ${out.action}`;
   }
-
-  // Sourcing: show sector filter
   if (agentName === "sourcing" && typeof input.sector === "string") {
     return `Sector: ${input.sector}`;
   }
-
   return `${agentName} task`;
 }
 
-/** Formats a duration in milliseconds as "Xm Ys" or "Xs". */
 function formatDuration(ms: number): string {
-  const secs = Math.floor(ms / 1000);
-  if (secs < 60) return `${secs}s`;
-  const mins = Math.floor(secs / 60);
-  const rem = secs % 60;
-  return rem > 0 ? `${mins}m ${rem}s` : `${mins}m`;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
-/** Formats an ISO string as a short local time "HH:MM:SS". */
 function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString([], {
     hour: "2-digit",
@@ -86,12 +67,6 @@ function formatTime(iso: string): string {
   });
 }
 
-/**
- * Computes a human-readable elapsed/duration string for a task.
- * - queued:    "Xm ago" (since created)
- * - running:   "Xm Ys elapsed" (since started)
- * - completed/failed: "Xm Ys" (total duration)
- */
 function getElapsed(task: AgentTask, now: number): string {
   if (task.status === "queued") {
     return formatDuration(now - new Date(task.created_at).getTime()) + " ago";
@@ -101,148 +76,184 @@ function getElapsed(task: AgentTask, now: number): string {
   }
   if (
     (task.status === "completed" || task.status === "failed") &&
-    task.started_at &&
-    task.completed_at
+    task.started_at && task.completed_at
   ) {
     return formatDuration(
-      new Date(task.completed_at).getTime() - new Date(task.started_at).getTime()
+      new Date(task.completed_at).getTime() - new Date(task.started_at).getTime(),
     );
   }
   return "—";
 }
 
+function runningProgress(startedAt: string | null): number {
+  if (!startedAt) return 10;
+  const elapsed = Date.now() - new Date(startedAt).getTime();
+  return Math.min(90, Math.round((elapsed / (elapsed + 30_000)) * 90));
+}
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-function SummaryCard({
+function StatCard({
   label,
   value,
   accent,
+  sub,
 }: {
   label: string;
-  value: number;
+  value: number | string;
   accent?: string;
+  sub?: string;
 }) {
   return (
-    <div className="rounded-xl border border-gray-200 bg-white px-6 py-5">
-      <p className="text-xs font-medium uppercase tracking-wider text-gray-500">
-        {label}
-      </p>
-      <p className={`mt-2 text-3xl font-bold ${accent ?? "text-gray-900"}`}>
+    <div className="rounded-xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
+      <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">{label}</p>
+      <p className={`mt-1.5 text-3xl font-bold tabular-nums ${accent ?? "text-slate-900"}`}>
         {value}
       </p>
+      {sub && <p className="mt-0.5 text-xs text-slate-400">{sub}</p>}
     </div>
   );
 }
 
 function AgentBadge({ name }: { name: AgentName }) {
-  const cls = AGENT_BADGE[name] ?? "bg-gray-100 text-gray-600";
+  const cfg = AGENT_BADGE[name] ?? AGENT_BADGE.sourcing;
   return (
-    <span
-      className={`inline-flex shrink-0 rounded-md px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${cls}`}
-    >
+    <span className={`inline-flex shrink-0 rounded-md px-2 py-0.5 text-[11px] font-semibold capitalize ${cfg.bg} ${cfg.text}`}>
       {name}
     </span>
   );
 }
 
-function StatusBadge({ status }: { status: AgentTaskStatus }) {
-  const { label, cls } = STATUS_BADGE[status] ?? STATUS_BADGE.queued;
+function StatusPill({ status }: { status: AgentTaskStatus }) {
+  const cfg = STATUS_BADGE[status];
   return (
-    <span
-      className={`inline-flex shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}
-    >
-      {label}
+    <span className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${cfg.bg} ${cfg.text}`}>
+      <span
+        className={`h-1.5 w-1.5 rounded-full ${cfg.dot} ${status === "running" ? "animate-pulse" : ""}`}
+      />
+      {cfg.label}
     </span>
+  );
+}
+
+function StatusIcon({ status }: { status: AgentTaskStatus }) {
+  if (status === "completed") {
+    return (
+      <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-50">
+        <svg className="h-3.5 w-3.5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+        </svg>
+      </div>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-red-50">
+        <svg className="h-3.5 w-3.5 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </div>
+    );
+  }
+  if (status === "running") {
+    return (
+      <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-blue-50">
+        <span className="h-2 w-2 animate-pulse rounded-full bg-blue-500" />
+      </div>
+    );
+  }
+  return (
+    <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100">
+      <span className="h-2 w-2 rounded-full bg-slate-400" />
+    </div>
   );
 }
 
 // ─── Task row ─────────────────────────────────────────────────────────────────
 
-interface TaskRowProps {
+function TaskRow({
+  task,
+  now,
+  index,
+  retryingIds,
+  onRetry,
+}: {
   task: AgentTask;
   now: number;
+  index: number;
   retryingIds: Set<string>;
-  onRetry: (taskId: string) => void;
-}
-
-function TaskRow({ task, now, retryingIds, onRetry }: TaskRowProps) {
-  const isRetrying = retryingIds.has(task.id);
-  const summary = summariseInput(
-    task.agent_name as AgentName,
-    task.input
-  );
-  const elapsed = getElapsed(task, now);
+  onRetry: (id: string) => void;
+}) {
+  const progress = task.status === "running" ? runningProgress(task.started_at) : null;
 
   return (
-    <div className="flex items-start gap-3 px-5 py-4 hover:bg-gray-50 transition-colors">
-      {/* Running pulse dot */}
-      <div className="mt-0.5 flex shrink-0 items-center justify-center w-4">
-        {task.status === "running" ? (
-          <span className="relative flex h-2.5 w-2.5">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
-            <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-amber-500" />
-          </span>
-        ) : task.status === "failed" ? (
-          <span className="h-2 w-2 rounded-full bg-red-400" />
-        ) : task.status === "completed" ? (
-          <span className="h-2 w-2 rounded-full bg-green-400" />
-        ) : (
-          <span className="h-2 w-2 rounded-full bg-gray-300" />
-        )}
-      </div>
+    <tr className={index % 2 === 0 ? "bg-white" : "bg-slate-50/70"}>
+      {/* Status icon */}
+      <td className="w-10 px-4 py-3.5">
+        <StatusIcon status={task.status} />
+      </td>
 
-      {/* Badges */}
-      <div className="flex shrink-0 flex-wrap gap-1.5 pt-px">
-        <AgentBadge name={task.agent_name as AgentName} />
-        <StatusBadge status={task.status} />
-      </div>
-
-      {/* Input summary + error */}
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm text-gray-800">{summary}</p>
-        {task.status === "failed" && task.error && (
-          <p className="mt-0.5 truncate text-xs text-red-500">{task.error}</p>
-        )}
-      </div>
-
-      {/* Timing */}
-      <div className="shrink-0 text-right">
-        <p className="text-xs tabular-nums text-gray-500">{elapsed}</p>
-        <p className="mt-0.5 text-xs tabular-nums text-gray-300">
-          {formatTime(task.created_at)}
+      {/* Agent + summary */}
+      <td className="px-3 py-3.5">
+        <div className="flex items-center gap-2">
+          <AgentBadge name={task.agent_name} />
+        </div>
+        <p className="mt-1 max-w-sm truncate text-xs text-slate-500">
+          {summariseInput(task.agent_name, task.input)}
         </p>
-      </div>
+        {progress !== null && (
+          <div className="mt-2 max-w-xs">
+            <div className="h-1 w-full rounded-full bg-slate-200">
+              <div
+                className="h-1 rounded-full bg-blue-500 transition-all duration-1000"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+          </div>
+        )}
+        {task.status === "failed" && task.error && (
+          <p className="mt-1 truncate text-xs text-red-600">{task.error}</p>
+        )}
+      </td>
+
+      {/* Status pill */}
+      <td className="px-3 py-3.5">
+        <StatusPill status={task.status} />
+      </td>
+
+      {/* Elapsed */}
+      <td className="px-3 py-3.5 text-right">
+        <p className="text-xs tabular-nums text-slate-600">{getElapsed(task, now)}</p>
+        <p className="mt-0.5 text-[10px] tabular-nums text-slate-400">{formatTime(task.created_at)}</p>
+      </td>
 
       {/* Retry */}
-      {task.status === "failed" && (
-        <button
-          onClick={() => onRetry(task.id)}
-          disabled={isRetrying}
-          className="shrink-0 rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-600 hover:border-gray-400 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-40 transition-colors"
-        >
-          {isRetrying ? "Retrying…" : "Retry"}
-        </button>
-      )}
-    </div>
+      <td className="px-4 py-3.5 text-right">
+        {task.status === "failed" && (
+          <button
+            onClick={() => onRetry(task.id)}
+            disabled={retryingIds.has(task.id)}
+            className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 shadow-sm transition-colors hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {retryingIds.has(task.id) ? "Retrying…" : "Retry"}
+          </button>
+        )}
+      </td>
+    </tr>
   );
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-interface AgentMonitorProps {
-  initialData: TasksResponse;
-}
-
-export function AgentMonitor({ initialData }: AgentMonitorProps) {
-  const [tasks, setTasks] = useState<AgentTask[]>(initialData.tasks);
-  const [summary, setSummary] = useState<TasksSummary>(initialData.summary);
-  const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
-  const [polling, setPolling] = useState(false);
-  const [retryingIds, setRetryingIds] = useState<Set<string>>(new Set());
-  // now is recomputed on each render to keep elapsed times current
+export function AgentMonitor({ initialData }: { initialData: TasksResponse }) {
+  const [tasks, setTasks]           = useState<AgentTask[]>(initialData.tasks);
+  const [summary, setSummary]       = useState<TasksSummary>(initialData.summary);
+  const [lastRefreshed, setLast]    = useState<Date>(new Date());
+  const [polling, setPolling]       = useState(false);
+  const [retryingIds, setRetrying]  = useState<Set<string>>(new Set());
   const now = Date.now();
 
-  // ── Polling ────────────────────────────────────────────────────────────────
+  // ── Polling ───────────────────────────────────────────────────────────────
   const refresh = useCallback(async () => {
     setPolling(true);
     try {
@@ -251,62 +262,58 @@ export function AgentMonitor({ initialData }: AgentMonitorProps) {
       const data: TasksResponse = await res.json();
       setTasks(data.tasks);
       setSummary(data.summary);
-      setLastRefreshed(new Date());
+      setLast(new Date());
     } catch {
-      // silently ignore — next poll will retry
+      // silently ignore
     } finally {
       setPolling(false);
     }
   }, []);
 
   useEffect(() => {
-    const id = setInterval(refresh, 10_000);
+    const id = setInterval(refresh, 5_000);
     return () => clearInterval(id);
   }, [refresh]);
 
-  // ── Retry ──────────────────────────────────────────────────────────────────
-  const handleRetry = useCallback(
-    async (taskId: string) => {
-      setRetryingIds((prev) => new Set(prev).add(taskId));
-      try {
-        const res = await fetch(`/api/agents/${taskId}/retry`, {
-          method: "POST",
-        });
-        if (res.ok) {
-          // Refresh immediately so the new queued task appears
-          await refresh();
-        }
-      } catch {
-        // silently ignore — user can try again
-      } finally {
-        setRetryingIds((prev) => {
-          const next = new Set(prev);
-          next.delete(taskId);
-          return next;
-        });
-      }
-    },
-    [refresh]
-  );
+  // ── Retry ─────────────────────────────────────────────────────────────────
+  const handleRetry = useCallback(async (taskId: string) => {
+    setRetrying((p) => new Set(p).add(taskId));
+    try {
+      const res = await fetch(`/api/agents/${taskId}/retry`, { method: "POST" });
+      if (res.ok) await refresh();
+    } catch {
+      // silently ignore
+    } finally {
+      setRetrying((p) => { const n = new Set(p); n.delete(taskId); return n; });
+    }
+  }, [refresh]);
 
-  // ──────────────────────────────────────────────────────────────────────────
+  // ── Derived ───────────────────────────────────────────────────────────────
+  const successRate =
+    summary.completed + summary.failed > 0
+      ? Math.round((summary.completed / (summary.completed + summary.failed)) * 100)
+      : null;
 
   return (
-    <div className="flex flex-col gap-6">
-      {/* Header */}
+    <div className="flex flex-col gap-7">
+      {/* ── Header ─────────────────────────────────────────────────────── */}
       <div className="flex items-end justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Agent Monitor</h1>
-          <p className="mt-1 text-sm text-gray-500">
-            Live view of all agent tasks. Auto-refreshes every 10 seconds.
+          <h1 className="text-2xl font-bold text-slate-900">Agent Monitor</h1>
+          <p className="mt-1 text-sm text-slate-500">
+            Live task feed · auto-refresh every 5s
           </p>
         </div>
-        <div className="flex items-center gap-2 text-xs text-gray-400">
+        <div className="flex items-center gap-2 text-xs text-slate-400">
           {polling && (
-            <span className="h-1.5 w-1.5 animate-ping rounded-full bg-gray-400" />
+            <svg className="h-3.5 w-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
           )}
           <span>
-            Updated {lastRefreshed.toLocaleTimeString([], {
+            Updated{" "}
+            {lastRefreshed.toLocaleTimeString([], {
               hour: "2-digit",
               minute: "2-digit",
               second: "2-digit",
@@ -315,71 +322,88 @@ export function AgentMonitor({ initialData }: AgentMonitorProps) {
         </div>
       </div>
 
-      {/* Summary cards */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <SummaryCard label="Tasks Today" value={summary.todayTotal} />
-        <SummaryCard
-          label="Running Now"
+      {/* ── Stat cards ─────────────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+        <StatCard label="Tasks Today"   value={summary.todayTotal} sub="dispatched" />
+        <StatCard
+          label="Running"
           value={summary.running}
-          accent={
-            summary.running > 0 ? "text-amber-600" : "text-gray-900"
-          }
+          accent={summary.running > 0 ? "text-blue-700" : "text-slate-400"}
+          sub={summary.running > 0 ? "active now" : "all idle"}
         />
-        <SummaryCard
+        <StatCard
           label="Completed"
           value={summary.completed}
-          accent="text-green-600"
+          accent="text-emerald-700"
+          sub="today"
         />
-        <SummaryCard
+        <StatCard
           label="Failed"
           value={summary.failed}
-          accent={summary.failed > 0 ? "text-red-600" : "text-gray-900"}
+          accent={summary.failed > 0 ? "text-red-700" : "text-slate-400"}
+          sub="today"
+        />
+        <StatCard
+          label="Success Rate"
+          value={successRate !== null ? `${successRate}%` : "—"}
+          accent={
+            successRate === null      ? "text-slate-400" :
+            successRate >= 80         ? "text-emerald-700" :
+            successRate >= 50         ? "text-amber-700" : "text-red-700"
+          }
+          sub="completed ÷ total"
         />
       </div>
 
-      {/* Activity feed */}
+      {/* ── Activity table ─────────────────────────────────────────────── */}
       <section>
-        <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-400">
+        <h2 className="mb-4 text-xs font-semibold uppercase tracking-wider text-slate-400">
           Activity Feed
         </h2>
 
-        <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
+        <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
           {tasks.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-20 text-center">
-              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-gray-100">
-                <svg
-                  className="h-6 w-6 text-gray-400"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth={1.5}
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"
-                  />
+              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-slate-100">
+                <svg className="h-5 w-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3" />
                 </svg>
               </div>
-              <p className="text-sm font-medium text-gray-600">
-                No agent activity yet.
-              </p>
-              <p className="mt-1 text-sm text-gray-400">
-                Send a prompt from the Deal Pipeline to get started.
+              <p className="text-sm font-medium text-slate-600">No agent activity yet</p>
+              <p className="mt-1 text-sm text-slate-400">
+                Submit a prompt from the Deal Pipeline to get started.
               </p>
             </div>
           ) : (
-            <div className="divide-y divide-gray-50">
-              {tasks.map((task) => (
-                <TaskRow
-                  key={task.id}
-                  task={task}
-                  now={now}
-                  retryingIds={retryingIds}
-                  onRetry={handleRetry}
-                />
-              ))}
-            </div>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 bg-slate-50">
+                  <th className="w-10 px-4 py-3" />
+                  <th className="px-3 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">
+                    Agent / Task
+                  </th>
+                  <th className="px-3 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">
+                    Status
+                  </th>
+                  <th className="px-3 py-3 text-right text-xs font-semibold uppercase tracking-wider text-slate-400">
+                    Duration
+                  </th>
+                  <th className="px-4 py-3" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {tasks.slice(0, 20).map((task, i) => (
+                  <TaskRow
+                    key={task.id}
+                    task={task}
+                    now={now}
+                    index={i}
+                    retryingIds={retryingIds}
+                    onRetry={handleRetry}
+                  />
+                ))}
+              </tbody>
+            </table>
           )}
         </div>
       </section>

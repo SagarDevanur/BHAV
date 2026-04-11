@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { UserButton, useUser } from "@clerk/nextjs";
 
 const NAV = [
   {
@@ -45,40 +46,72 @@ const NAV = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const { user, isLoaded } = useUser();
 
   return (
-    <aside className="flex w-60 shrink-0 flex-col bg-gray-950 text-white">
+    <aside className="flex w-60 shrink-0 flex-col border-r border-slate-200 bg-white">
       {/* Brand */}
-      <div className="border-b border-gray-800 px-5 py-5">
-        <p className="text-[10px] font-bold uppercase tracking-widest text-gray-500">BHAV</p>
-        <p className="mt-0.5 text-sm font-semibold text-white">Acquisition Corp</p>
+      <div className="border-b border-slate-100 px-6 py-5">
+        <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">
+          BHAV
+        </p>
+        <p className="mt-0.5 text-base font-bold text-slate-900">
+          Acquisition Corp
+        </p>
       </div>
 
       {/* Nav */}
-      <nav className="flex flex-1 flex-col gap-0.5 px-3 py-4 text-sm">
+      <nav className="flex flex-1 flex-col gap-0.5 px-3 py-4">
         {NAV.map(({ label, href, icon }) => {
-          const active = pathname === href || (href !== "/dashboard" && pathname.startsWith(href));
+          const active =
+            pathname === href ||
+            (href !== "/dashboard" && pathname.startsWith(href));
           return (
             <Link
               key={href}
               href={href}
               className={[
-                "flex items-center gap-3 rounded-lg px-3 py-2 transition-colors",
+                "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors relative",
                 active
-                  ? "bg-gray-800 text-white font-medium"
-                  : "text-gray-400 hover:bg-gray-800/60 hover:text-white",
+                  ? "bg-blue-50 text-blue-700"
+                  : "text-slate-600 hover:bg-slate-50 hover:text-slate-900",
               ].join(" ")}
             >
-              {icon}
+              {/* Active left border indicator */}
+              {active && (
+                <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-full bg-blue-700" />
+              )}
+              <span className={active ? "text-blue-600" : "text-slate-400"}>
+                {icon}
+              </span>
               {label}
             </Link>
           );
         })}
       </nav>
 
-      {/* Footer */}
-      <div className="border-t border-gray-800 px-5 py-4">
-        <p className="text-[11px] text-gray-600">Internal platform · v0.1</p>
+      {/* Co-founder footer */}
+      <div className="border-t border-slate-100 px-4 py-4">
+        <div className="flex items-center gap-3">
+          <UserButton />
+          <div className="min-w-0 flex-1">
+            {isLoaded && user ? (
+              <>
+                <p className="truncate text-sm font-semibold text-slate-900">
+                  {user.fullName ?? "Co-founder"}
+                </p>
+                <p className="truncate text-xs text-slate-400">
+                  {user.primaryEmailAddress?.emailAddress}
+                </p>
+              </>
+            ) : (
+              <div className="space-y-1">
+                <div className="h-3.5 w-24 animate-pulse rounded bg-slate-100" />
+                <div className="h-3 w-32 animate-pulse rounded bg-slate-100" />
+              </div>
+            )}
+          </div>
+        </div>
       </div>
     </aside>
   );

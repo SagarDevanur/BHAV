@@ -1,39 +1,24 @@
 "use client";
 
 import { useState, useEffect, useMemo, useCallback } from "react";
-import type {
-  Company,
-  Contact,
-  AgentResult,
-  CompanyStatus,
-} from "@/types/database";
+import type { Company, Contact, AgentResult, CompanyStatus } from "@/types/database";
 import { CompanySidePanel } from "./company-side-panel";
 
-// ─── Constants ──────────────────────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-const SECTORS = [
-  "All",
-  "Physical AI",
-  "Drones & UAV",
-  "FinTech",
-  "Autonomous EVs",
-] as const;
-
+const SECTORS = ["All", "Physical AI", "Drones & UAV", "FinTech", "Autonomous EVs"] as const;
 const PAGE_SIZE = 50;
 
-const STATUS_CONFIG: Record<
-  CompanyStatus,
-  { label: string; pillClass: string }
-> = {
-  sourced: { label: "Sourced", pillClass: "bg-gray-100 text-gray-700" },
-  scoring: { label: "Scoring", pillClass: "bg-blue-100 text-blue-700" },
-  reviewed: { label: "Reviewed", pillClass: "bg-amber-100 text-amber-700" },
-  approved: { label: "Approved", pillClass: "bg-green-100 text-green-700" },
-  rejected: { label: "Rejected", pillClass: "bg-red-100 text-red-700" },
-  loi_sent: { label: "LOI Sent", pillClass: "bg-purple-100 text-purple-700" },
+const STATUS_CONFIG: Record<CompanyStatus, { label: string; bg: string; text: string }> = {
+  sourced:  { label: "Sourced",  bg: "bg-slate-100",    text: "text-slate-600" },
+  scoring:  { label: "Scoring",  bg: "bg-blue-50",      text: "text-blue-700" },
+  reviewed: { label: "Reviewed", bg: "bg-amber-50",     text: "text-amber-700" },
+  approved: { label: "Approved", bg: "bg-emerald-50",   text: "text-emerald-700" },
+  rejected: { label: "Rejected", bg: "bg-red-50",       text: "text-red-700" },
+  loi_sent: { label: "LOI Sent", bg: "bg-purple-50",    text: "text-purple-700" },
 };
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface CompanyWithContacts extends Company {
   contacts: Contact[];
@@ -43,136 +28,137 @@ interface CompaniesViewProps {
   initialCompanies: CompanyWithContacts[];
 }
 
-// ─── Component ───────────────────────────────────────────────────────────────
+// ─── Score bar ────────────────────────────────────────────────────────────────
+
+function ScoreBar({ score }: { score: number }) {
+  const barColor  = score >= 70 ? "bg-emerald-500" : score >= 40 ? "bg-amber-500" : "bg-red-500";
+  const textColor = score >= 70 ? "text-emerald-700" : score >= 40 ? "text-amber-700" : "text-red-700";
+
+  return (
+    <div className="flex items-center gap-2">
+      <div className="h-1.5 w-24 rounded-full bg-slate-100">
+        <div
+          className={`h-1.5 rounded-full transition-all duration-500 ${barColor}`}
+          style={{ width: `${score}%` }}
+        />
+      </div>
+      <span className={`w-7 shrink-0 text-xs font-bold tabular-nums ${textColor}`}>
+        {score}
+      </span>
+    </div>
+  );
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 export function CompaniesView({ initialCompanies }: CompaniesViewProps) {
-  const [companies, setCompanies] =
-    useState<CompanyWithContacts[]>(initialCompanies);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [companies, setCompanies]       = useState<CompanyWithContacts[]>(initialCompanies);
+  const [searchQuery, setSearchQuery]   = useState("");
   const [sectorFilter, setSectorFilter] = useState<string>("All");
-  const [currentPage, setCurrentPage] = useState(1);
-  const [selectedCompany, setSelectedCompany] =
-    useState<CompanyWithContacts | null>(null);
+  const [currentPage, setCurrentPage]   = useState(1);
+  const [selectedCompany, setSelectedCompany] = useState<CompanyWithContacts | null>(null);
   const [agentResults, setAgentResults] = useState<AgentResult[]>([]);
   const [loadingResults, setLoadingResults] = useState(false);
-  const [updatingIds, setUpdatingIds] = useState<Set<string>>(new Set());
+  const [updatingIds, setUpdatingIds]   = useState<Set<string>>(new Set());
 
-  // ── Fetch agent results when side panel opens ────────────────────────────
+  // ── Fetch agent results when side panel opens ─────────────────────────────
   useEffect(() => {
     if (!selectedCompany) {
       setAgentResults([]);
       return;
     }
-
-    async function fetchAgentResults() {
+    async function fetch_() {
       if (!selectedCompany) return;
       setLoadingResults(true);
       try {
         const res = await fetch(`/api/companies/${selectedCompany.id}`);
-        if (!res.ok) throw new Error("Failed to fetch agent results");
-        const data: AgentResult[] = await res.json();
-        setAgentResults(data);
-      } catch (err) {
-        console.error("Failed to fetch agent results:", err);
+        if (!res.ok) throw new Error("Failed");
+        setAgentResults(await res.json() as AgentResult[]);
+      } catch {
         setAgentResults([]);
       } finally {
         setLoadingResults(false);
       }
     }
-
-    fetchAgentResults();
+    fetch_();
   }, [selectedCompany?.id]);
 
-  // ── Filter + search (client-side) ────────────────────────────────────────
+  // ── Filter + search ───────────────────────────────────────────────────────
   const filtered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return companies.filter((company) => {
-      const matchesSector =
-        sectorFilter === "All" || company.sector === sectorFilter;
-      const matchesSearch = q === "" || company.name.toLowerCase().includes(q);
-      return matchesSector && matchesSearch;
+    return companies.filter((c) => {
+      const matchSector = sectorFilter === "All" || c.sector === sectorFilter;
+      const matchSearch = q === "" || c.name.toLowerCase().includes(q);
+      return matchSector && matchSearch;
     });
   }, [companies, sectorFilter, searchQuery]);
 
-  // Reset to page 1 whenever filters change
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [searchQuery, sectorFilter]);
+  useEffect(() => { setCurrentPage(1); }, [searchQuery, sectorFilter]);
 
-  // ── Pagination ───────────────────────────────────────────────────────────
+  // ── Pagination ────────────────────────────────────────────────────────────
   const totalCount = filtered.length;
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
-  const pageStart = (currentPage - 1) * PAGE_SIZE;
-  const paginated = filtered.slice(pageStart, pageStart + PAGE_SIZE);
+  const pageStart  = (currentPage - 1) * PAGE_SIZE;
+  const paginated  = filtered.slice(pageStart, pageStart + PAGE_SIZE);
 
-  // ── Status update ────────────────────────────────────────────────────────
-  const handleStatusUpdate = useCallback(
-    async (companyId: string, status: CompanyStatus) => {
-      setUpdatingIds((prev) => new Set(prev).add(companyId));
+  // ── Status update ─────────────────────────────────────────────────────────
+  const handleStatusUpdate = useCallback(async (companyId: string, status: CompanyStatus) => {
+    setUpdatingIds((prev) => new Set(prev).add(companyId));
+    try {
+      const res = await fetch(`/api/companies/${companyId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+      if (!res.ok) throw new Error("Update failed");
+      setCompanies((prev) => prev.map((c) => (c.id === companyId ? { ...c, status } : c)));
+      setSelectedCompany((prev) => prev?.id === companyId ? { ...prev, status } : prev);
+    } catch (err) {
+      console.error("Failed to update status:", err);
+    } finally {
+      setUpdatingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(companyId);
+        return next;
+      });
+    }
+  }, []);
 
-      try {
-        const res = await fetch(`/api/companies/${companyId}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status }),
-        });
-
-        if (!res.ok) throw new Error("Update failed");
-
-        setCompanies((prev) =>
-          prev.map((c) => (c.id === companyId ? { ...c, status } : c))
-        );
-        setSelectedCompany((prev) =>
-          prev?.id === companyId ? { ...prev, status } : prev
-        );
-      } catch (err) {
-        console.error("Failed to update status:", err);
-      } finally {
-        setUpdatingIds((prev) => {
-          const next = new Set(prev);
-          next.delete(companyId);
-          return next;
-        });
-      }
-    },
-    []
-  );
-
-  // ── Helpers ──────────────────────────────────────────────────────────────
   function getDecisionMaker(company: CompanyWithContacts): string {
     if (!company.contacts?.length) return "—";
-    const senior = company.contacts.find((c) =>
-      c.title?.match(/CEO|CFO|CTO|COO|President|Founder/i)
-    );
-    const contact = senior ?? company.contacts[0];
-    return contact.name ?? "—";
+    const senior = company.contacts.find((c) => c.title?.match(/CEO|CFO|CTO|COO|President|Founder/i));
+    return (senior ?? company.contacts[0]).name ?? "—";
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
+  const scoredCount   = filtered.filter((c) => c.despac_score !== null).length;
+  const approvedCount = filtered.filter((c) => c.status === "approved" || c.status === "loi_sent").length;
 
   return (
-    <div className="flex flex-col gap-5">
-      {/* Page header */}
+    <div className="flex flex-col gap-6">
+      {/* ── Page header ──────────────────────────────────────────────────── */}
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Companies</h1>
-        <p className="mt-1 text-sm text-gray-500">
-          {totalCount} {totalCount === 1 ? "company" : "companies"} found
+        <h1 className="text-2xl font-bold text-slate-900">Companies</h1>
+        <p className="mt-1 text-sm text-slate-500">
+          {totalCount} {totalCount === 1 ? "company" : "companies"}
+          {scoredCount > 0 && ` · ${scoredCount} scored`}
+          {approvedCount > 0 && ` · ${approvedCount} approved`}
         </p>
       </div>
 
-      {/* Filters row */}
+      {/* ── Filters row ──────────────────────────────────────────────────── */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         {/* Sector pills */}
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-1.5">
           {SECTORS.map((sector) => (
             <button
               key={sector}
               onClick={() => setSectorFilter(sector)}
-              className={`rounded-full px-3 py-1 text-sm font-medium transition-colors ${
+              className={[
+                "rounded-full px-3 py-1 text-xs font-semibold transition-colors",
                 sectorFilter === sector
-                  ? "bg-gray-900 text-white"
-                  : "border border-gray-200 bg-white text-gray-600 hover:border-gray-400"
-              }`}
+                  ? "bg-blue-700 text-white"
+                  : "border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-900",
+              ].join(" ")}
             >
               {sector}
             </button>
@@ -185,125 +171,122 @@ export function CompaniesView({ initialCompanies }: CompaniesViewProps) {
           placeholder="Search companies…"
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          className="w-full rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 sm:w-64"
+          className="w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 sm:w-64"
         />
       </div>
 
-      {/* Table */}
-      <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
+      {/* ── Table ────────────────────────────────────────────────────────── */}
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
         {paginated.length === 0 ? (
-          <div className="flex h-64 items-center justify-center text-sm text-gray-400">
-            No companies match your filters.
+          <div className="flex h-64 items-center justify-center">
+            <p className="text-sm text-slate-400">No companies match your filters.</p>
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-gray-100 bg-gray-50">
-                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400">
+                <tr className="border-b border-slate-200 bg-slate-50">
+                  <th className="px-5 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-slate-400">
                     Company
                   </th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400">
+                  <th className="px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-slate-400">
                     Sector
                   </th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400">
-                    Sub-sector
-                  </th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400">
+                  <th className="hidden px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-slate-400 lg:table-cell">
                     Decision Maker
                   </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-400">
+                  <th className="px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-slate-400">
                     deSPAC Score
                   </th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400">
+                  <th className="px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-slate-400">
                     Status
                   </th>
-                  <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-400">
+                  <th className="px-4 py-3 text-right text-[10px] font-bold uppercase tracking-widest text-slate-400">
                     Actions
                   </th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100">
-                {paginated.map((company) => {
+              <tbody className="divide-y divide-slate-100">
+                {paginated.map((company, idx) => {
                   const isUpdating = updatingIds.has(company.id);
-                  const { label, pillClass } = STATUS_CONFIG[company.status];
+                  const { label, bg, text } = STATUS_CONFIG[company.status];
+                  const isSelected = selectedCompany?.id === company.id;
 
                   return (
                     <tr
                       key={company.id}
                       onClick={() => setSelectedCompany(company)}
-                      className="cursor-pointer transition-colors hover:bg-gray-50"
+                      className={[
+                        "cursor-pointer transition-colors",
+                        isSelected
+                          ? "bg-blue-50"
+                          : idx % 2 === 0
+                          ? "bg-white hover:bg-slate-50"
+                          : "bg-slate-50/70 hover:bg-slate-100/70",
+                      ].join(" ")}
                     >
                       {/* Name + website */}
-                      <td className="px-4 py-3">
-                        <div className="font-medium text-gray-900">
-                          {company.name}
+                      <td className="px-5 py-3.5">
+                        <div className="min-w-0">
+                          <p className="font-semibold text-slate-900">{company.name}</p>
+                          {company.website && (
+                            <p className="max-w-[180px] truncate text-[11px] text-slate-400">
+                              {company.website}
+                            </p>
+                          )}
                         </div>
-                        {company.website && (
-                          <div className="max-w-[200px] truncate text-xs text-gray-400">
-                            {company.website}
-                          </div>
-                        )}
                       </td>
 
                       {/* Sector */}
-                      <td className="px-4 py-3 text-gray-600">
-                        {company.sector ?? "—"}
-                      </td>
-
-                      {/* Sub-sector */}
-                      <td className="px-4 py-3 text-xs text-gray-500">
-                        {company.sub_sector ?? "—"}
+                      <td className="px-4 py-3.5">
+                        <div>
+                          <p className="text-slate-700">{company.sector ?? "—"}</p>
+                          {company.sub_sector && (
+                            <p className="text-[11px] text-slate-400">{company.sub_sector}</p>
+                          )}
+                        </div>
                       </td>
 
                       {/* Decision maker */}
-                      <td className="px-4 py-3 text-gray-600">
+                      <td className="hidden px-4 py-3.5 text-slate-500 lg:table-cell">
                         {getDecisionMaker(company)}
                       </td>
 
-                      {/* deSPAC score */}
-                      <td className="px-4 py-3 text-center">
+                      {/* Score bar */}
+                      <td className="px-4 py-3.5">
                         {company.despac_score !== null ? (
-                          <ScorePill score={company.despac_score} />
+                          <ScoreBar score={company.despac_score} />
                         ) : (
-                          <span className="text-gray-300">—</span>
+                          <span className="text-slate-300">—</span>
                         )}
                       </td>
 
                       {/* Status badge */}
-                      <td className="px-4 py-3">
+                      <td className="px-4 py-3.5">
                         <span
-                          className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${pillClass}`}
+                          className={`inline-flex rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${bg} ${text}`}
                         >
                           {label}
                         </span>
                       </td>
 
-                      {/* Approve / Reject — stop row click propagation */}
+                      {/* Actions */}
                       <td
-                        className="px-4 py-3"
+                        className="px-4 py-3.5"
                         onClick={(e) => e.stopPropagation()}
                       >
                         <div className="flex justify-end gap-2">
                           <button
-                            onClick={() =>
-                              handleStatusUpdate(company.id, "approved")
-                            }
-                            disabled={
-                              isUpdating || company.status === "approved"
-                            }
-                            className="rounded px-2 py-1 text-xs font-medium bg-green-50 text-green-700 hover:bg-green-100 disabled:cursor-not-allowed disabled:opacity-40 transition-colors"
+                            onClick={() => handleStatusUpdate(company.id, "approved")}
+                            disabled={isUpdating || company.status === "approved"}
+                            className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-600 transition-all hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-30"
                           >
                             Approve
                           </button>
                           <button
-                            onClick={() =>
-                              handleStatusUpdate(company.id, "rejected")
-                            }
-                            disabled={
-                              isUpdating || company.status === "rejected"
-                            }
-                            className="rounded px-2 py-1 text-xs font-medium bg-red-50 text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-40 transition-colors"
+                            onClick={() => handleStatusUpdate(company.id, "rejected")}
+                            disabled={isUpdating || company.status === "rejected"}
+                            className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-600 transition-all hover:border-red-300 hover:bg-red-50 hover:text-red-700 disabled:cursor-not-allowed disabled:opacity-30"
                           >
                             Reject
                           </button>
@@ -318,30 +301,27 @@ export function CompaniesView({ initialCompanies }: CompaniesViewProps) {
         )}
       </div>
 
-      {/* Pagination */}
+      {/* ── Pagination ───────────────────────────────────────────────────── */}
       {totalPages > 1 && (
-        <div className="flex items-center justify-between text-sm text-gray-500">
-          <span>
-            Showing {pageStart + 1}–
-            {Math.min(pageStart + PAGE_SIZE, totalCount)} of {totalCount}
+        <div className="flex items-center justify-between text-sm">
+          <span className="text-slate-500">
+            {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, totalCount)} of {totalCount}
           </span>
           <div className="flex items-center gap-2">
             <button
               onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
               disabled={currentPage === 1}
-              className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40 transition-colors"
+              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-slate-600 shadow-sm hover:border-slate-300 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-30 transition-colors"
             >
               Previous
             </button>
-            <span className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 tabular-nums">
+            <span className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-mono text-slate-500 tabular-nums shadow-sm">
               {currentPage} / {totalPages}
             </span>
             <button
-              onClick={() =>
-                setCurrentPage((p) => Math.min(totalPages, p + 1))
-              }
+              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
               disabled={currentPage === totalPages}
-              className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40 transition-colors"
+              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-slate-600 shadow-sm hover:border-slate-300 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-30 transition-colors"
             >
               Next
             </button>
@@ -349,7 +329,7 @@ export function CompaniesView({ initialCompanies }: CompaniesViewProps) {
         </div>
       )}
 
-      {/* Side panel */}
+      {/* ── Side panel ───────────────────────────────────────────────────── */}
       {selectedCompany && (
         <CompanySidePanel
           company={selectedCompany}
@@ -357,30 +337,9 @@ export function CompaniesView({ initialCompanies }: CompaniesViewProps) {
           loadingResults={loadingResults}
           isUpdating={updatingIds.has(selectedCompany.id)}
           onClose={() => setSelectedCompany(null)}
-          onStatusChange={(status) =>
-            handleStatusUpdate(selectedCompany.id, status)
-          }
+          onStatusChange={(status) => handleStatusUpdate(selectedCompany.id, status)}
         />
       )}
     </div>
-  );
-}
-
-// ─── Sub-components ───────────────────────────────────────────────────────────
-
-function ScorePill({ score }: { score: number }) {
-  const colorClass =
-    score >= 75
-      ? "text-green-700 bg-green-50"
-      : score >= 50
-        ? "text-amber-700 bg-amber-50"
-        : "text-gray-600 bg-gray-100";
-
-  return (
-    <span
-      className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold tabular-nums ${colorClass}`}
-    >
-      {score}
-    </span>
   );
 }

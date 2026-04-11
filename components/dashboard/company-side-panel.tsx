@@ -141,7 +141,7 @@ export function CompanySidePanel({
             <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-400">
               Contacts{" "}
               {company.contacts.length > 0 && (
-                <span className="normal-case font-normal text-gray-300">
+                <span className="normal-case font-normal text-gray-400">
                   ({company.contacts.length})
                 </span>
               )}
@@ -194,7 +194,7 @@ export function CompanySidePanel({
             <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-400">
               Agent Results{" "}
               {agentResults.length > 0 && (
-                <span className="normal-case font-normal text-gray-300">
+                <span className="normal-case font-normal text-gray-400">
                   ({agentResults.length})
                 </span>
               )}
