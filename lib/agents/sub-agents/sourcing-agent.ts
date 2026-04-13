@@ -2,7 +2,7 @@
  * Sourcing Agent — discovers deSPAC target companies from public data sources.
  *
  * Search order:
- *   1. SEC EDGAR full-text search (public S-1 / 10-K filings, no key required)
+ *   1. YCombinator API  — finds YC-backed companies in our target sectors (no key required)
  *   2. Google News / NewsAPI (requires GOOGLE_NEWS_API_KEY in config)
  *   3. Claude processes the raw results and returns structured company records
  *
@@ -27,33 +27,47 @@ import type { InsertCompany } from "@/types/database";
 
 const anthropic = new Anthropic({ apiKey: config.anthropic.apiKey });
 
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const EDGAR_BASE_URL = "https://efts.sec.gov/LATEST/search-index";
-const NEWS_BASE_URL  = "https://newsapi.org/v2/everything";
+const NEWS_BASE_URL = "https://newsapi.org/v2/everything";
+const YC_API_URL    = "https://api.ycombinator.com/v0.1/companies";
 
 /** Max companies Claude is asked to return per run. */
 const DEFAULT_MAX_RESULTS = 20;
 
-/** EDGAR forms most likely to yield private/pre-IPO companies. */
-const EDGAR_FORMS = "S-1,S-1%2FA,10-K12G";
-
-/** Start date for EDGAR and news searches — rolling 18-month window. */
+/** Rolling 18-month window start date for news searches. */
 function searchStartDate(): string {
   const d = new Date();
   d.setMonth(d.getMonth() - 18);
-  return d.toISOString().slice(0, 10); // YYYY-MM-DD
+  return d.toISOString().slice(0, 10);
 }
 
-/** Sector-specific search phrases used to build EDGAR + news queries. */
-const SECTOR_PHRASES: Record<string, string[]> = {
-  "Physical AI":     ["physical AI", "embodied AI", "AI robotics", "AI hardware startup"],
-  "Drones & UAV":    ["drone startup", "UAV company", "unmanned aerial vehicle", "autonomous drone"],
-  "FinTech":         ["fintech startup", "financial technology", "payments startup", "insurtech"],
-  "Autonomous EVs":  ["autonomous vehicle startup", "self-driving startup", "electric vehicle startup"],
+/**
+ * Sector-specific search phrases used for News and YC queries.
+ * Each entry has a news phrase (for NewsAPI) and a yc tag (for YC API q= param).
+ */
+const SECTOR_CONFIG: Record<
+  string,
+  { newsPhrases: string[]; ycQueries: string[] }
+> = {
+  "Physical AI": {
+    newsPhrases: ["physical AI startup", "embodied AI funding", "AI robotics startup"],
+    ycQueries:   ["physical AI", "embodied AI", "AI robotics hardware"],
+  },
+  "Drones & UAV": {
+    newsPhrases: ["drone startup funding", "UAV company revenue", "unmanned aerial vehicle startup"],
+    ycQueries:   ["drone", "UAV", "unmanned aerial"],
+  },
+  "FinTech": {
+    newsPhrases: ["fintech startup Series", "payments startup funding", "insurtech revenue"],
+    ycQueries:   ["fintech", "payments", "insurtech"],
+  },
+  "Autonomous EVs": {
+    newsPhrases: ["autonomous vehicle startup funding", "self-driving startup revenue", "electric vehicle startup"],
+    ycQueries:   ["autonomous vehicle", "self-driving", "electric vehicle"],
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -67,29 +81,29 @@ export interface SourcingRunResult {
   totalFoundByLlm: number;
   newCompaniesInserted: number;
   skippedDuplicates: number;
-  edgarResultCount: number;
+  ycResultCount: number;
   newsResultCount: number;
   modelUsed: string;
 }
 
 // ---------------------------------------------------------------------------
-// Internal types for raw search results
+// Internal types
 // ---------------------------------------------------------------------------
 
-interface EdgarHitSource {
-  entity_name?: string;
-  display_names?: string[];
-  form_type?: string;
-  file_date?: string;
-  period_of_report?: string;
-  biz_location?: string;
+interface YcCompanyRaw {
+  name?: string;
+  slug?: string;
+  website?: string;
+  one_liner?: string;
+  long_description?: string;
+  batch?: string;
+  status?: string;
+  all_locations?: string;
+  tags?: string[];
 }
 
-interface EdgarResponse {
-  hits?: {
-    hits?: Array<{ _source?: EdgarHitSource }>;
-    total?: { value?: number };
-  };
+interface YcApiResponse {
+  companies?: YcCompanyRaw[];
 }
 
 interface NewsArticle {
@@ -133,33 +147,20 @@ function nowIso(): string {
 }
 
 /**
- * Builds a URL-encoded search query string from sector and optional keywords.
- * Returns phrases joined with OR for broad coverage.
+ * Builds a human-readable search query string from sector phrases.
+ * Used as the `searchQuery` field in SourcingRunResult.
  */
 function buildSearchQuery(
   sector: string | null | undefined,
-  keywords: string[] | null | undefined
+  keywords: string[] | null | undefined,
 ): string {
-  const phrases: string[] = [];
+  const cfg = sector ? SECTOR_CONFIG[sector] : null;
+  const phrases = cfg
+    ? cfg.newsPhrases
+    : ["physical AI startup", "drone company funding", "fintech startup", "autonomous vehicle startup"];
 
-  if (sector && SECTOR_PHRASES[sector]) {
-    phrases.push(...SECTOR_PHRASES[sector]);
-  } else {
-    // No sector filter — use a representative cross-sector sample
-    phrases.push(
-      "physical AI startup",
-      "drone company funding",
-      "fintech startup",
-      "autonomous vehicle startup"
-    );
-  }
-
-  if (keywords?.length) {
-    phrases.push(...keywords);
-  }
-
-  // Use the first 4 phrases to keep the query focused and within API limits
-  return phrases.slice(0, 4).join(" OR ");
+  const extras = keywords?.length ? keywords : [];
+  return [...phrases.slice(0, 3), ...extras.slice(0, 2)].join(" OR ");
 }
 
 /**
@@ -201,56 +202,62 @@ function normaliseWebsiteForStorage(url: string | null | undefined): string | nu
 }
 
 // ---------------------------------------------------------------------------
-// Step 1: SEC EDGAR search
+// Step 1: YCombinator API search
 // ---------------------------------------------------------------------------
 
 /**
- * Searches SEC EDGAR full-text search for recent S-1 filings matching the query.
- * Returns extracted company names and context snippets for Claude to process.
- * Fails silently — if EDGAR is down the agent continues without it.
+ * Searches the public YCombinator API for companies matching the sector.
+ * Runs multiple queries (one per ycQueries entry) and deduplicates results.
+ * Returns a compact text block for Claude to process.
+ *
+ * Fails silently — if YC API is unreachable the agent continues without it.
  */
-async function searchEdgar(
-  query: string
-): Promise<{ results: EdgarHitSource[]; rawText: string }> {
-  const startDate = searchStartDate();
-  const encodedQuery = encodeURIComponent(`"${query.replace(/ OR /g, '" OR "')}"`.slice(0, 200));
+async function searchYcombinator(
+  sector: string | null | undefined,
+): Promise<{ results: YcCompanyRaw[]; rawText: string }> {
+  const cfg      = sector ? SECTOR_CONFIG[sector] : null;
+  const queries  = cfg?.ycQueries ?? ["startup funding", "tech company", "AI company", "fintech"];
+  const seen     = new Set<string>();
+  const allHits: YcCompanyRaw[] = [];
 
-  const url =
-    `${EDGAR_BASE_URL}?q=${encodedQuery}` +
-    `&forms=${EDGAR_FORMS}` +
-    `&dateRange=custom&startdt=${startDate}` +
-    `&_source=entity_name,display_names,form_type,file_date,biz_location` +
-    `&hits.hits.total.relation=eq` +
-    `&hits.hits._source=entity_name,display_names,form_type,file_date` +
-    `&from=0&size=20`;
+  for (const q of queries.slice(0, 3)) {
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 5_000);
 
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": "BHAV Acquisition Corp contact@bhavacquisition.com",
-      "Accept":     "application/json",
-    },
-    signal: AbortSignal.timeout(10_000),
-  });
+    try {
+      const url = `${YC_API_URL}?q=${encodeURIComponent(q)}&status=Active`;
+      const res = await fetch(url, {
+        signal:  controller.signal,
+        headers: { Accept: "application/json" },
+      });
 
-  if (!response.ok) {
-    throw new Error(`EDGAR returned HTTP ${response.status}`);
+      if (!res.ok) continue;
+
+      const json = (await res.json()) as YcApiResponse;
+      for (const c of json.companies ?? []) {
+        const key = (c.name ?? "").toLowerCase().trim();
+        if (key && !seen.has(key)) {
+          seen.add(key);
+          allHits.push(c);
+        }
+      }
+    } catch {
+      // Timeout or network error on this query — skip and continue
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 
-  const data = (await response.json()) as EdgarResponse;
-  const hits = data.hits?.hits ?? [];
-  const results: EdgarHitSource[] = hits
-    .map((h) => h._source)
-    .filter((s): s is EdgarHitSource => !!s);
+  const rawText =
+    allHits
+      .slice(0, 30)
+      .map(
+        (c) =>
+          `- ${c.name ?? "?"} | Batch: ${c.batch ?? "?"} | ${c.one_liner ?? ""} | ${c.website ?? ""} | Tags: ${(c.tags ?? []).join(", ")}`,
+      )
+      .join("\n") || "(no YC results)";
 
-  // Build a compact text block for Claude to parse
-  const rawText = results
-    .map((r) => {
-      const name = r.entity_name ?? r.display_names?.[0] ?? "Unknown";
-      return `- ${name} | ${r.form_type ?? ""} | Filed: ${r.file_date ?? ""} | Location: ${r.biz_location ?? ""}`;
-    })
-    .join("\n");
-
-  return { results, rawText: rawText || "(no EDGAR results)" };
+  return { results: allHits.slice(0, 30), rawText };
 }
 
 // ---------------------------------------------------------------------------
@@ -258,45 +265,51 @@ async function searchEdgar(
 // ---------------------------------------------------------------------------
 
 /**
- * Searches NewsAPI (newsapi.org) for recent articles about companies
- * in our target sectors. Requires GOOGLE_NEWS_API_KEY to be set.
- * Fails silently — if the API key is absent or the call fails, returns empty.
+ * Searches NewsAPI for recent articles about companies in our target sectors.
+ * Requires GOOGLE_NEWS_API_KEY — returns empty results when absent.
+ * Fails silently on network errors.
  */
 async function searchNews(
-  query: string
+  query: string,
 ): Promise<{ articles: NewsArticle[]; rawText: string }> {
   const apiKey = config.googleNews.apiKey;
   if (!apiKey) {
     return { articles: [], rawText: "(GOOGLE_NEWS_API_KEY not set — news search skipped)" };
   }
 
-  const encodedQuery = encodeURIComponent(query.slice(0, 200));
-  const url =
-    `${NEWS_BASE_URL}?q=${encodedQuery}` +
-    `&apiKey=${apiKey}` +
-    `&language=en&pageSize=20&sortBy=publishedAt` +
-    `&from=${searchStartDate()}`;
+  const controller = new AbortController();
+  const timeoutId  = setTimeout(() => controller.abort(), 10_000);
 
-  const response = await fetch(url, {
-    signal: AbortSignal.timeout(10_000),
-  });
+  try {
+    const encodedQuery = encodeURIComponent(query.slice(0, 200));
+    const url =
+      `${NEWS_BASE_URL}?q=${encodedQuery}` +
+      `&apiKey=${apiKey}` +
+      `&language=en&pageSize=20&sortBy=publishedAt` +
+      `&from=${searchStartDate()}`;
 
-  if (!response.ok) {
-    throw new Error(`NewsAPI returned HTTP ${response.status}`);
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`NewsAPI returned HTTP ${response.status}`);
+    }
+
+    const data = (await response.json()) as NewsApiResponse;
+    const articles = data.articles ?? [];
+
+    const rawText =
+      articles
+        .map((a) => {
+          const src = a.source?.name ?? "Unknown";
+          return `- [${src}] ${a.title ?? ""}: ${a.description ?? ""} | ${a.url ?? ""}`;
+        })
+        .join("\n") || "(no news results)";
+
+    return { articles, rawText };
+  } catch {
+    return { articles: [], rawText: "(news search failed)" };
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  const data = (await response.json()) as NewsApiResponse;
-  const articles = data.articles ?? [];
-
-  // Build a compact text block for Claude to parse
-  const rawText = articles
-    .map((a) => {
-      const src = a.source?.name ?? "Unknown";
-      return `- [${src}] ${a.title ?? ""}: ${a.description ?? ""} | ${a.url ?? ""}`;
-    })
-    .join("\n");
-
-  return { articles, rawText: rawText || "(no news results)" };
 }
 
 // ---------------------------------------------------------------------------
@@ -304,19 +317,17 @@ async function searchNews(
 // ---------------------------------------------------------------------------
 
 /**
- * Calls Claude (with OpenAI fallback) to extract and structure company
- * records from the raw EDGAR + news search results.
- *
- * The sourcing system prompt instructs Claude not to invent companies;
- * the raw search data acts as the grounding source.
+ * Calls Claude to extract and structure company records from YC + news results.
+ * The sourcing system prompt instructs Claude not to invent companies —
+ * raw search data acts as grounding.
  */
 async function extractCompaniesWithLlm(
   sector: string | null | undefined,
   searchQuery: string,
-  edgarText: string,
+  ycText: string,
   newsText: string,
   maxResults: number,
-  approvedByHuman: boolean
+  approvedByHuman: boolean,
 ): Promise<{ response: LlmSourcingResponse; modelUsed: string }> {
   const userMessage = JSON.stringify({
     sector:         sector ?? null,
@@ -324,16 +335,17 @@ async function extractCompaniesWithLlm(
     maxResults,
     searchQuery,
     approvedByHuman,
-    // Raw search data provided as grounding — Claude must extract only real
-    // companies present in this data, not invent new ones.
+    // Raw search data — Claude must extract only companies present in this data
     rawSearchData: {
-      edgar: edgarText,
-      news:  newsText,
+      yc_companies: ycText,
+      news:         newsText,
     },
     instructions:
       "Extract companies from rawSearchData that match the TARGET CRITERIA. " +
       "Only include companies explicitly mentioned in the raw data. " +
+      "YC-backed companies (from yc_companies) are high-quality targets — include them when they match sector and stage criteria. " +
       "Infer sector, sub_sector, blurb, and financials from context where possible. " +
+      "Set last_round to the YC batch string (e.g. 'YC W22') for YC companies when no other round is known. " +
       "Set estimated_revenue if mentioned. Use null for fields with no evidence.",
   });
 
@@ -357,7 +369,6 @@ async function extractCompaniesWithLlm(
     .replace(/```\n?/g, "")
     .trim();
 
-  // Parse and validate — tolerate partial responses
   let parsed: LlmSourcingResponse;
   try {
     const raw = JSON.parse(jsonText) as Record<string, unknown>;
@@ -386,14 +397,11 @@ interface ExistingRecord {
 
 /**
  * Fetches all existing company names and websites from Supabase and
- * returns normalised sets for O(1) dedup lookups.
+ * returns normalised records for O(1) dedup lookups.
  */
 async function fetchExistingCompanyIndex(): Promise<ExistingRecord[]> {
   const supabase = createAdminClient();
-
-  const { data, error } = await supabase
-    .from("companies")
-    .select("name, website");
+  const { data, error } = await supabase.from("companies").select("name, website");
 
   if (error) {
     throw new Error(`Failed to fetch existing companies for dedup: ${error.message}`);
@@ -406,18 +414,16 @@ async function fetchExistingCompanyIndex(): Promise<ExistingRecord[]> {
 }
 
 /**
- * Returns the subset of Claude-returned companies that are not already
- * in the existing index (matched by normalised name OR normalised website).
+ * Returns the subset of Claude-returned companies not already in the
+ * existing index (matched by normalised name OR normalised website).
  */
 function filterNewCompanies(
   candidates: LlmCompany[],
-  existing: ExistingRecord[]
+  existing: ExistingRecord[],
 ): LlmCompany[] {
   const existingNames    = new Set(existing.map((e) => e.normalisedName));
   const existingWebsites = new Set(
-    existing
-      .map((e) => e.normalisedWebsite)
-      .filter((w): w is string => w !== null)
+    existing.map((e) => e.normalisedWebsite).filter((w): w is string => w !== null),
   );
 
   return candidates.filter((c) => {
@@ -437,14 +443,13 @@ function filterNewCompanies(
  * Returns the inserted rows (with their generated IDs).
  */
 async function insertNewCompanies(
-  companies: LlmCompany[]
+  companies: LlmCompany[],
 ): Promise<Array<{ id: string; name: string }>> {
   if (companies.length === 0) return [];
 
   const supabase = createAdminClient();
 
   const inserts: InsertCompany[] = companies.map((c) => {
-    // The DB has no estimated_revenue column — fold it into the blurb
     const blurbWithRevenue =
       c.estimated_revenue
         ? `${c.blurb ?? ""}${c.blurb ? " " : ""}Est. revenue: ${c.estimated_revenue}.`.trim()
@@ -483,7 +488,7 @@ async function writeAgentResults(
   taskId: string,
   insertedCompanies: Array<{ id: string; name: string }>,
   searchSummary: string,
-  modelUsed: string
+  modelUsed: string,
 ): Promise<void> {
   if (insertedCompanies.length === 0) return;
 
@@ -494,7 +499,7 @@ async function writeAgentResults(
     company_id:  company.id,
     agent_name:  "sourcing",
     result_type: "sourcing",
-    content:     {
+    content: {
       companyName:   company.name,
       searchSummary,
       modelUsed,
@@ -505,7 +510,7 @@ async function writeAgentResults(
   const { error } = await supabase.from("agent_results").insert(rows);
 
   if (error) {
-    // Non-fatal — companies are already inserted; don't fail the task
+    // Non-fatal — companies are already inserted
     console.error("[Sourcing agent] Failed to write agent_results:", error.message);
   }
 }
@@ -520,7 +525,7 @@ async function writeAgentResults(
  * Flow:
  *   1. Mark agent_tasks row as running.
  *   2. Build search query from sector + keywords in payload.
- *   3. Fetch raw results from EDGAR (always) and NewsAPI (if key present).
+ *   3. Fetch raw results from YC API and NewsAPI in parallel.
  *   4. Call Claude to extract structured company records from raw data.
  *   5. Dedup against existing Supabase companies by name + website.
  *   6. Insert new companies with status "sourced".
@@ -559,20 +564,20 @@ export async function runSourcingAgent(input: AgentInput): Promise<SourcingRunRe
     const searchQuery = buildSearchQuery(sector, keywords);
 
     // ------------------------------------------------------------------
-    // 3. Parallel: EDGAR + NewsAPI
+    // 3. Parallel: YC API + NewsAPI
     // ------------------------------------------------------------------
-    const [edgarResult, newsResult] = await Promise.allSettled([
-      searchEdgar(searchQuery),
+    const [ycResult, newsResult] = await Promise.allSettled([
+      searchYcombinator(sector),
       searchNews(searchQuery),
     ]);
 
-    const edgarText =
-      edgarResult.status === "fulfilled"
-        ? edgarResult.value.rawText
-        : `(EDGAR search failed: ${edgarResult.reason instanceof Error ? edgarResult.reason.message : String(edgarResult.reason)})`;
+    const ycText =
+      ycResult.status === "fulfilled"
+        ? ycResult.value.rawText
+        : `(YC search failed: ${ycResult.reason instanceof Error ? ycResult.reason.message : String(ycResult.reason)})`;
 
-    const edgarCount =
-      edgarResult.status === "fulfilled" ? edgarResult.value.results.length : 0;
+    const ycCount =
+      ycResult.status === "fulfilled" ? ycResult.value.results.length : 0;
 
     const newsText =
       newsResult.status === "fulfilled"
@@ -582,12 +587,7 @@ export async function runSourcingAgent(input: AgentInput): Promise<SourcingRunRe
     const newsCount =
       newsResult.status === "fulfilled" ? newsResult.value.articles.length : 0;
 
-    if (edgarResult.status === "rejected") {
-      console.warn("[Sourcing agent] EDGAR search failed:", edgarResult.reason);
-    }
-    if (newsResult.status === "rejected") {
-      console.warn("[Sourcing agent] News search failed:", newsResult.reason);
-    }
+    console.log(`[Sourcing agent] YC results: ${ycCount}, news results: ${newsCount}`);
 
     // ------------------------------------------------------------------
     // 4. Claude extracts structured companies from raw results
@@ -595,10 +595,10 @@ export async function runSourcingAgent(input: AgentInput): Promise<SourcingRunRe
     const { response: llmResponse, modelUsed } = await extractCompaniesWithLlm(
       sector,
       searchQuery,
-      edgarText,
+      ycText,
       newsText,
       maxResults,
-      input.approvedByHuman ?? false
+      input.approvedByHuman ?? false,
     );
 
     // ------------------------------------------------------------------
@@ -616,25 +616,20 @@ export async function runSourcingAgent(input: AgentInput): Promise<SourcingRunRe
     // ------------------------------------------------------------------
     // 7. Write agent_results per inserted company
     // ------------------------------------------------------------------
-    await writeAgentResults(
-      input.taskId,
-      inserted,
-      llmResponse.searchSummary,
-      modelUsed
-    );
+    await writeAgentResults(input.taskId, inserted, llmResponse.searchSummary, modelUsed);
 
     // ------------------------------------------------------------------
     // 8. Mark task completed
     // ------------------------------------------------------------------
     const result: SourcingRunResult = {
-      taskId:              input.taskId,
+      taskId:               input.taskId,
       sector,
       searchQuery,
-      totalFoundByLlm:     llmResponse.companies.length,
+      totalFoundByLlm:      llmResponse.companies.length,
       newCompaniesInserted: inserted.length,
-      skippedDuplicates:   skipped,
-      edgarResultCount:    edgarCount,
-      newsResultCount:     newsCount,
+      skippedDuplicates:    skipped,
+      ycResultCount:        ycCount,
+      newsResultCount:      newsCount,
       modelUsed,
     };
 

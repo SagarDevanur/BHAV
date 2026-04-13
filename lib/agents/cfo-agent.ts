@@ -4,6 +4,16 @@
  * Input:  AgentInput (company fields arrive via input.payload, taskId via input.taskId)
  * Output: CfoRunResult containing despac_score, score_breakdown, recommendation, reasoning
  *
+ * Pre-screening (runs before any enrichment or Claude call):
+ *   - Checks SEC EDGAR for 10-K filings (already public) or S-1 filings (filing to go public).
+ *   - If found: sets despac_score = 0, status = "rejected", skips Claude entirely.
+ *   - EDGAR failure is non-fatal — scoring proceeds if the check times out or errors.
+ *
+ * Enrichment sources (all non-fatal — scoring continues if any fail):
+ *   1. Company website  — title, meta description, revenue/funding/team signals (5 s timeout)
+ *   2. Google News API  — recent funding/revenue articles for this company (5 s timeout)
+ *   3. YCombinator API  — confirms YC backing and batch; adds +5 bonus to redemption_risk
+ *
  * Side effects:
  *   - Updates agent_tasks row (running → completed | failed)
  *   - Updates companies.despac_score in Supabase
@@ -22,7 +32,7 @@ import type { AgentInput } from "@/types/agents";
 const anthropic = new Anthropic({ apiKey: config.anthropic.apiKey });
 
 // ---------------------------------------------------------------------------
-// Types
+// Types — public
 // ---------------------------------------------------------------------------
 
 export interface CfoScoreBreakdown {
@@ -50,6 +60,10 @@ export interface CfoRunResult {
   modelUsed: string;
 }
 
+// ---------------------------------------------------------------------------
+// Types — internal
+// ---------------------------------------------------------------------------
+
 interface LlmCfoResponse {
   companyId: string;
   despac_score: number;
@@ -59,86 +73,327 @@ interface LlmCfoResponse {
   confidence: "low" | "medium" | "high";
 }
 
-/** A single filing extracted from the EDGAR full-text search response. */
-interface EdgarFiling {
-  entityName: string;
-  formType: string;
-  fileDate: string;
-  periodOfReport: string | null;
-  description: string;
+interface WebsiteMeta {
+  title: string | null;
+  description: string | null;
+  /** Revenue mentions found in page text, e.g. "$12M ARR" */
+  revenueSignals: string[];
+  /** Funding mentions found in page text, e.g. "raised Series B" */
+  fundingSignals: string[];
+  /** Team-size mentions found in page text, e.g. "200 employees" */
+  teamSignals: string[];
+}
+
+interface NewsItem {
+  title: string;
+  description: string | null;
+  publishedAt: string;
+  source: string;
+}
+
+interface YcData {
+  name: string;
+  batch: string;
+  website: string | null;
+  description: string | null;
+}
+
+interface EdgarPreScreenResult {
+  /** true = company has public SEC filings → ineligible for deSPAC */
+  isPublic: boolean;
+  /** Which form triggered the flag ("10-K" | "S-1"), or null if private/unknown */
+  formType: string | null;
+  /** Entity name as it appears on EDGAR, or null */
+  entityName: string | null;
+  /** Human-readable reason for the flag */
+  reason: string | null;
 }
 
 // ---------------------------------------------------------------------------
-// EDGAR fetch
+// Pre-screening: SEC EDGAR public-company check
 // ---------------------------------------------------------------------------
 
 /**
- * Searches the SEC EDGAR full-text search API for 10-K and S-1 filings
- * matching the company name. Returns up to 5 filings with key metadata.
+ * Searches SEC EDGAR for 10-K and S-1 filings matching the company name.
  *
- * Uses a 5-second AbortController timeout — EDGAR can be slow. On any
- * error or timeout the function returns null so scoring continues without
- * EDGAR data rather than failing the entire task.
+ *  - 10-K present → company already files with the SEC as a public company → ineligible
+ *  - S-1 present  → company is pursuing a traditional IPO → ineligible for deSPAC
  *
- * @param companyName - The company name to search for in EDGAR
- * @returns Array of matched filings, or null if the fetch failed / timed out
+ * Both searches run in parallel with a shared 5-second AbortController timeout.
+ * Returns { isPublic: false } on any network error so scoring always proceeds
+ * when EDGAR is unreachable.
  */
-async function fetchEdgarFilings(companyName: string): Promise<EdgarFiling[] | null> {
+async function checkEdgarPublicListing(
+  companyName: string,
+): Promise<EdgarPreScreenResult> {
+  const EDGAR_BASE = "https://efts.sec.gov/LATEST/search-index";
+  const USER_AGENT = "BHAV-Acquisition-Corp contact@bhav.io";
+
+  const encoded = encodeURIComponent(`"${companyName}"`);
+
   const controller = new AbortController();
   const timeoutId  = setTimeout(() => controller.abort(), 5_000);
 
-  try {
-    const encoded = encodeURIComponent(`"${companyName}"`);
-    const url = [
-      "https://efts.sec.gov/LATEST/search-index",
-      `?q=${encoded}`,
-      "&forms=10-K,S-1",
-      "&dateRange=custom",
-      "&startdt=2020-01-01",
-      "&enddt=2025-01-01",
-      "&hits.hits.total.relation=eq",
-      "&hits.hits._source=entity_name,file_date,period_of_report,form_type,description",
-    ].join("");
+  const fetchForm = async (forms: string) => {
+    const url =
+      `${EDGAR_BASE}?q=${encoded}&forms=${forms}` +
+      `&hits.hits._source=entity_name,form_type,file_date` +
+      `&from=0&size=1`;
 
     const res = await fetch(url, {
       signal:  controller.signal,
-      headers: { "User-Agent": "BHAV-Acquisition-Corp contact@bhav.io" },
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Accept":     "application/json",
+      },
     });
 
     if (!res.ok) return null;
 
     const json = (await res.json()) as {
       hits?: {
-        hits?: {
-          _source?: {
-            entity_name?: string;
-            form_type?: string;
-            file_date?: string;
-            period_of_report?: string;
-            description?: string;
-          };
-        }[];
+        hits?: Array<{
+          _source?: { entity_name?: string; form_type?: string; file_date?: string };
+        }>;
       };
     };
 
-    const hits = json?.hits?.hits ?? [];
-    if (hits.length === 0) return null;
+    const hit = json?.hits?.hits?.[0]?._source;
+    return hit ?? null;
+  };
 
-    return hits.slice(0, 5).map((hit) => ({
-      entityName:     String(hit._source?.entity_name    ?? ""),
-      formType:       String(hit._source?.form_type       ?? ""),
-      fileDate:       String(hit._source?.file_date        ?? ""),
-      periodOfReport: hit._source?.period_of_report != null
-        ? String(hit._source.period_of_report)
-        : null,
-      description:    String(hit._source?.description     ?? ""),
-    }));
+  try {
+    const [tenK, s1] = await Promise.all([
+      fetchForm("10-K"),
+      fetchForm("S-1"),
+    ]);
+
+    if (tenK) {
+      return {
+        isPublic:   true,
+        formType:   "10-K",
+        entityName: tenK.entity_name ?? null,
+        reason:     `10-K filing found on SEC EDGAR (filed by "${tenK.entity_name ?? companyName}") — company is already publicly listed`,
+      };
+    }
+
+    if (s1) {
+      return {
+        isPublic:   true,
+        formType:   "S-1",
+        entityName: s1.entity_name ?? null,
+        reason:     `S-1 registration statement found on SEC EDGAR (filed by "${s1.entity_name ?? companyName}") — company is pursuing a traditional IPO`,
+      };
+    }
+
+    return { isPublic: false, formType: null, entityName: null, reason: null };
   } catch {
-    // Timeout (AbortError) or network error — fall back silently
+    // Network error or timeout — treat as private so scoring is not blocked
+    return { isPublic: false, formType: null, entityName: null, reason: null };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Enrichment: company website scrape
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetches the company's homepage and extracts:
+ *   - Page title and meta description for business context
+ *   - Revenue, funding, and team-size signal mentions from body text
+ *
+ * Uses a 5-second AbortController timeout. Returns null on any error.
+ */
+async function fetchWebsiteMeta(websiteUrl: string): Promise<WebsiteMeta | null> {
+  const controller = new AbortController();
+  const timeoutId  = setTimeout(() => controller.abort(), 5_000);
+
+  try {
+    const url = /^https?:\/\//i.test(websiteUrl)
+      ? websiteUrl
+      : `https://${websiteUrl}`;
+
+    const res = await fetch(url, {
+      signal:  controller.signal,
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; BHAV-Research-Bot/1.0)" },
+    });
+
+    if (!res.ok) return null;
+
+    const html = await res.text();
+
+    // Title
+    const titleMatch = /<title[^>]*>([^<]+)<\/title>/i.exec(html);
+    const title       = titleMatch ? titleMatch[1].trim() : null;
+
+    // Meta description — handle both attribute orderings
+    const descMatch =
+      /<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i.exec(html) ??
+      /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']description["']/i.exec(html);
+    const description = descMatch ? descMatch[1].trim() : null;
+
+    // Strip tags for text signal extraction
+    const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+
+    const revenueSignals = Array.from(
+      new Set(
+        (text.match(/\$[\d,.]+\s*[MBK]?\s*(?:million|billion|ARR|MRR|revenue|recurring)/gi) ?? [])
+          .slice(0, 5)
+      ),
+    );
+
+    const fundingSignals = Array.from(
+      new Set(
+        (text.match(/(?:Series [A-E]\b|raised|Seed round|funding round|investment)[^.]{0,100}/gi) ?? [])
+          .slice(0, 5)
+          .map((s) => s.trim()),
+      ),
+    );
+
+    const teamSignals = Array.from(
+      new Set(
+        (text.match(/\d+\s*\+?\s*(?:employees|team members|people|staff)/gi) ?? []).slice(0, 3),
+      ),
+    );
+
+    return { title, description, revenueSignals, fundingSignals, teamSignals };
+  } catch {
     return null;
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Enrichment: Google News search
+// ---------------------------------------------------------------------------
+
+/**
+ * Searches NewsAPI for recent articles about the company mentioning
+ * funding, revenue, or fundraising rounds. Returns up to 5 articles.
+ *
+ * Requires GOOGLE_NEWS_API_KEY — returns null when key is absent.
+ * Uses a 5-second AbortController timeout.
+ */
+async function searchCompanyNews(companyName: string): Promise<NewsItem[] | null> {
+  const apiKey = config.googleNews.apiKey;
+  if (!apiKey) return null;
+
+  const controller = new AbortController();
+  const timeoutId  = setTimeout(() => controller.abort(), 5_000);
+
+  try {
+    const twoYearsAgo = new Date();
+    twoYearsAgo.setFullYear(twoYearsAgo.getFullYear() - 2);
+    const from = twoYearsAgo.toISOString().slice(0, 10);
+
+    const query = encodeURIComponent(`"${companyName}" funding OR revenue OR Series`);
+    const url   =
+      `https://newsapi.org/v2/everything` +
+      `?q=${query}&from=${from}&language=en&pageSize=5&sortBy=publishedAt&apiKey=${apiKey}`;
+
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) return null;
+
+    const json = (await res.json()) as {
+      articles?: Array<{
+        title?: string;
+        description?: string;
+        publishedAt?: string;
+        source?: { name?: string };
+      }>;
+    };
+
+    return (json.articles ?? []).slice(0, 5).map((a) => ({
+      title:       String(a.title        ?? ""),
+      description: a.description ? String(a.description) : null,
+      publishedAt: String(a.publishedAt  ?? ""),
+      source:      String(a.source?.name ?? ""),
+    }));
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Enrichment: YCombinator API
+// ---------------------------------------------------------------------------
+
+/**
+ * Checks whether the company is YC-backed by querying the public YC API.
+ * Returns the matching company record on an exact name match (case-insensitive),
+ * or the first result as a best-effort match, or null if nothing is found.
+ *
+ * Uses a 5-second AbortController timeout.
+ */
+async function checkYcombinator(companyName: string): Promise<YcData | null> {
+  const controller = new AbortController();
+  const timeoutId  = setTimeout(() => controller.abort(), 5_000);
+
+  try {
+    const query = encodeURIComponent(companyName);
+    const url   = `https://api.ycombinator.com/v0.1/companies?q=${query}`;
+
+    const res = await fetch(url, {
+      signal:  controller.signal,
+      headers: { Accept: "application/json" },
+    });
+
+    if (!res.ok) return null;
+
+    const json = (await res.json()) as {
+      companies?: Array<{
+        name?: string;
+        batch?: string;
+        website?: string;
+        one_liner?: string;
+        long_description?: string;
+      }>;
+    };
+
+    const companies = json.companies ?? [];
+    if (companies.length === 0) return null;
+
+    const normalised = companyName.toLowerCase().trim();
+    const exact       = companies.find(
+      (c) => (c.name ?? "").toLowerCase().trim() === normalised,
+    );
+    const match = exact ?? companies[0];
+
+    return {
+      name:        String(match.name    ?? ""),
+      batch:       String(match.batch   ?? ""),
+      website:     match.website  ? String(match.website)      : null,
+      description: match.one_liner ? String(match.one_liner)   : null,
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Supabase: fetch company website URL
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetches just the website field for a company so the CFO agent can scrape it.
+ * Returns null if the company has no website or on any DB error.
+ */
+async function fetchCompanyWebsite(companyId: string): Promise<string | null> {
+  const supabase = createAdminClient();
+  const { data } = await supabase
+    .from("companies")
+    .select("website")
+    .eq("id", companyId)
+    .single();
+
+  return (data as { website?: string | null } | null)?.website ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,14 +462,17 @@ function validateLlmResponse(raw: unknown): LlmCfoResponse {
  *
  * Flow:
  *   1. Mark agent_tasks row as running.
- *   2. Fetch EDGAR 10-K/S-1 filings for the company (5 s timeout, non-fatal).
- *   3. Fetch any prior sourcing agent_results from Supabase.
- *   4. Build enriched prompt: company fields + EDGAR data + sourcing intel.
- *   5. Call Claude and parse the structured JSON response.
- *   6. Update companies.despac_score in Supabase.
- *   7. Write a scored row to agent_results.
- *   8. Mark agent_tasks row as completed (or failed on any error).
- *   9. Return the structured CfoRunResult.
+ *   2. Pre-screen: check SEC EDGAR for 10-K / S-1 filings.
+ *      → If public: reject immediately (despac_score = 0, status = "rejected"), return early.
+ *      → If private (or EDGAR unavailable): continue.
+ *   3. Fetch company website URL from Supabase.
+ *   4. Run enrichment in parallel: website scrape + Google News + YC check + sourcing intel.
+ *   5. Build enriched prompt: company fields + website meta + news + YC data + sourcing intel.
+ *   6. Call Claude and parse the structured JSON response.
+ *   7. Update companies.despac_score in Supabase.
+ *   8. Write a scored row to agent_results.
+ *   9. Mark agent_tasks row as completed (or failed on any error).
+ *  10. Return the structured CfoRunResult.
  */
 export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
   const supabase  = createAdminClient();
@@ -222,15 +480,14 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
   const companyId = input.companyId ?? String(payload.companyId ?? "");
 
   // ------------------------------------------------------------------
-  // Startup diagnostics — printed to Railway logs on every run
+  // Startup diagnostics
   // ------------------------------------------------------------------
   console.log("[CFO agent] ── START ──────────────────────────────────────");
-  console.log("[CFO agent] taskId         :", input.taskId);
-  console.log("[CFO agent] input.companyId:", input.companyId ?? "(not set)");
-  console.log("[CFO agent] payload.companyId:", String(payload.companyId ?? "(not set)"));
+  console.log("[CFO agent] taskId           :", input.taskId);
   console.log("[CFO agent] resolved companyId:", companyId || "(EMPTY — will throw)");
-  console.log("[CFO agent] supabase URL   :", process.env.NEXT_PUBLIC_SUPABASE_URL ?? "(NOT SET — DB calls will fail)");
-  console.log("[CFO agent] service key set:", Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY));
+  console.log("[CFO agent] supabase URL     :", process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? "(NOT SET — DB calls will fail)");
+  console.log("[CFO agent] service key set  :", Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY));
+  console.log("[CFO agent] news API set     :", Boolean(config.googleNews.apiKey));
 
   if (!companyId) throw new Error("CFO agent requires a companyId");
 
@@ -246,37 +503,107 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     const companyName = String(payload.name ?? "");
 
     // ------------------------------------------------------------------
-    // 2. Fetch EDGAR filings (5 s timeout — non-fatal on failure)
+    // 2. Pre-screen: SEC EDGAR public-company check
     // ------------------------------------------------------------------
-    const edgarFilings = companyName
-      ? await fetchEdgarFilings(companyName)
-      : null;
+    const edgarScreen = companyName
+      ? await checkEdgarPublicListing(companyName)
+      : { isPublic: false, formType: null, entityName: null, reason: null };
 
-    if (edgarFilings) {
-      console.log(
-        `[CFO agent] EDGAR: found ${edgarFilings.length} filing(s) for "${companyName}"`
-      );
-    } else {
-      console.log(
-        `[CFO agent] EDGAR: no filings found for "${companyName}" — using Excel fields only`
-      );
+    if (edgarScreen.isPublic) {
+      console.log(`[CFO agent] ${companyName} — PUBLIC (skip): ${edgarScreen.reason ?? ""}`);
+
+      const publicResultContent: Record<string, unknown> = {
+        despac_score:    0,
+        score_breakdown: { revenue_fit: 0, valuation_band: 0, sector_alignment: 0, redemption_risk: 0 },
+        rationale: {
+          revenue_fit:      "Ineligible — company already has SEC public filings.",
+          valuation_band:   "Ineligible — company already has SEC public filings.",
+          sector_alignment: "Ineligible — company already has SEC public filings.",
+          redemption_risk:  "Ineligible — company already has SEC public filings.",
+        },
+        recommendation:  "reject",
+        confidence:      "high",
+        skipped_reason:  edgarScreen.reason,
+        edgar_form_type: edgarScreen.formType,
+        edgar_entity:    edgarScreen.entityName,
+        modelUsed:       "edgar-pre-screen",
+      };
+
+      // Update companies table — score 0, rejected
+      await supabase
+        .from("companies")
+        .update({ despac_score: 0, status: "rejected", updated_at: new Date().toISOString() })
+        .eq("id", companyId);
+
+      // Write agent_results note
+      await supabase.from("agent_results").insert({
+        task_id:     input.taskId,
+        company_id:  companyId,
+        agent_name:  "cfo",
+        result_type: "score",
+        content:     publicResultContent,
+      });
+
+      // Mark task completed
+      await supabase
+        .from("agent_tasks")
+        .update({ status: "completed", output: publicResultContent, completed_at: new Date().toISOString() })
+        .eq("id", input.taskId);
+
+      return {
+        taskId:          input.taskId,
+        companyId,
+        despac_score:    0,
+        score_breakdown: { revenue_fit: 0, valuation_band: 0, sector_alignment: 0, redemption_risk: 0 },
+        rationale: {
+          revenue_fit:      "Ineligible — company already has SEC public filings.",
+          valuation_band:   "Ineligible — company already has SEC public filings.",
+          sector_alignment: "Ineligible — company already has SEC public filings.",
+          redemption_risk:  "Ineligible — company already has SEC public filings.",
+        },
+        recommendation: "reject",
+        confidence:     "high",
+        modelUsed:      "edgar-pre-screen",
+      };
     }
 
-    // ------------------------------------------------------------------
-    // 3. Fetch prior sourcing intel from Supabase (non-fatal if absent)
-    // ------------------------------------------------------------------
-    const { data: sourcingRows } = await supabase
-      .from("agent_results")
-      .select("content")
-      .eq("company_id", companyId)
-      .eq("result_type", "sourcing")
-      .order("created_at", { ascending: false })
-      .limit(3);
-
-    const sourcingIntel: unknown[] = (sourcingRows ?? []).map((r) => r.content);
+    console.log(`[CFO agent] ${companyName} — PRIVATE (score)`);
 
     // ------------------------------------------------------------------
-    // 4. Build enriched user message
+    // 3. Fetch company website URL
+    // ------------------------------------------------------------------
+    const websiteUrl = String(payload.website ?? "") || await fetchCompanyWebsite(companyId);
+
+    // ------------------------------------------------------------------
+    // 4. Parallel enrichment + sourcing intel fetch
+    // ------------------------------------------------------------------
+    const [websiteResult, newsResult, ycResult, sourcingResult] = await Promise.allSettled([
+      websiteUrl ? fetchWebsiteMeta(websiteUrl) : Promise.resolve(null),
+      companyName ? searchCompanyNews(companyName) : Promise.resolve(null),
+      companyName ? checkYcombinator(companyName) : Promise.resolve(null),
+      supabase
+        .from("agent_results")
+        .select("content")
+        .eq("company_id", companyId)
+        .eq("result_type", "sourcing")
+        .order("created_at", { ascending: false })
+        .limit(3),
+    ]);
+
+    const websiteMeta  = websiteResult.status === "fulfilled" ? websiteResult.value : null;
+    const newsItems    = newsResult.status    === "fulfilled" ? newsResult.value    : null;
+    const ycData       = ycResult.status      === "fulfilled" ? ycResult.value      : null;
+    const sourcingRows = sourcingResult.status === "fulfilled"
+      ? (sourcingResult.value.data ?? []).map((r) => r.content)
+      : [];
+
+    console.log("[CFO agent] website scraped :", websiteMeta ? "yes" : "no");
+    console.log("[CFO agent] news articles   :", newsItems?.length ?? 0);
+    console.log("[CFO agent] YC backed       :", ycData ? `yes — batch ${ycData.batch}` : "no");
+    console.log("[CFO agent] sourcing intel  :", sourcingRows.length, "row(s)");
+
+    // ------------------------------------------------------------------
+    // 5. Build enriched user message
     // ------------------------------------------------------------------
     const userMessage = JSON.stringify({
       companyId,
@@ -288,14 +615,19 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
       last_round:          payload.last_round          ?? null,
       blurb:               payload.blurb               ?? null,
       approvedByHuman:     input.approvedByHuman       ?? false,
-      // EDGAR SEC filings — 10-K and S-1 data found for this company
-      edgar_filings:  edgarFilings  ?? null,
-      // Prior sourcing agent context (news, revenue signals, etc.)
-      sourcing_intel: sourcingIntel.length > 0 ? sourcingIntel : null,
+      // Enrichment: website signals
+      website_meta: websiteMeta ?? null,
+      // Enrichment: recent news about this company
+      news_intel: newsItems && newsItems.length > 0 ? newsItems : null,
+      // Enrichment: YC backing
+      yc_backed: ycData !== null,
+      yc_data:   ycData ?? null,
+      // Prior sourcing agent context
+      sourcing_intel: sourcingRows.length > 0 ? sourcingRows : null,
     });
 
     // ------------------------------------------------------------------
-    // 5. Call Claude
+    // 6. Call Claude
     // ------------------------------------------------------------------
     const message = await anthropic.messages.create({
       model:      config.anthropic.model,
@@ -311,11 +643,9 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     const responseText = message.content[0].text;
     const modelUsed    = config.anthropic.model;
 
-    // Log raw response so we can see exactly what Claude returned
     console.log("[CFO agent] raw Claude response (first 600 chars):");
     console.log(responseText.slice(0, 600));
 
-    // Strip markdown code fences — Claude sometimes wraps JSON in ```json ... ```
     const jsonText = responseText
       .replace(/```json\n?/g, "")
       .replace(/```\n?/g, "")
@@ -339,9 +669,7 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     console.log("[CFO agent] confidence     :", parsed.confidence);
 
     // ------------------------------------------------------------------
-    // 6. Update companies.despac_score
-    // NOTE: Supabase .update().eq() never errors when zero rows match —
-    // it silently succeeds. We add .select("id") to detect that case.
+    // 7. Update companies.despac_score
     // ------------------------------------------------------------------
     console.log(`[CFO agent] updating companies SET despac_score=${parsed.despac_score} WHERE id=${companyId}`);
 
@@ -367,7 +695,6 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     if (!updatedRows || updatedRows.length === 0) {
       throw new Error(
         `[CFO agent] companies UPDATE matched 0 rows — companyId "${companyId}" not found. ` +
-        `Supabase URL in use: ${process.env.NEXT_PUBLIC_SUPABASE_URL ?? "(NOT SET)"}. ` +
         `Verify this companyId exists in the companies table.`
       );
     }
@@ -377,15 +704,18 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     );
 
     // ------------------------------------------------------------------
-    // 7. Write to agent_results
+    // 8. Write to agent_results
     // ------------------------------------------------------------------
     const resultContent: Record<string, unknown> = {
-      despac_score:    parsed.despac_score,
-      score_breakdown: parsed.score_breakdown,
-      rationale:       parsed.rationale,
-      recommendation:  parsed.recommendation,
-      confidence:      parsed.confidence,
-      edgar_filings_used: edgarFilings ? edgarFilings.length : 0,
+      despac_score:       parsed.despac_score,
+      score_breakdown:    parsed.score_breakdown,
+      rationale:          parsed.rationale,
+      recommendation:     parsed.recommendation,
+      confidence:         parsed.confidence,
+      yc_backed:          ycData !== null,
+      yc_batch:           ycData?.batch ?? null,
+      news_articles_used: newsItems?.length ?? 0,
+      website_scraped:    websiteMeta !== null,
       modelUsed,
     };
 
@@ -402,7 +732,7 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     }
 
     // ------------------------------------------------------------------
-    // 8. Mark task completed
+    // 9. Mark task completed
     // ------------------------------------------------------------------
     await supabase
       .from("agent_tasks")
@@ -414,7 +744,7 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
       .eq("id", input.taskId);
 
     // ------------------------------------------------------------------
-    // 9. Return structured result
+    // 10. Return structured result
     // ------------------------------------------------------------------
     return {
       taskId:          input.taskId,

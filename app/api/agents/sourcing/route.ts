@@ -2,7 +2,7 @@
  * POST /api/agents/sourcing
  *
  * Triggers the Sourcing agent to discover new deSPAC target companies.
- * Searches SEC EDGAR and Google News, then uses Claude to extract and
+ * Searches the YCombinator API and Google News, then uses Claude to extract and
  * insert new company records into Supabase.
  *
  * Request body:
