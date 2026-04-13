@@ -84,8 +84,10 @@ function nextjsOnly(key: (typeof NEXTJS_VARS)[number]): string {
 
 export const config = {
   supabase: {
-    // Safe for browser — public Supabase project URL
-    url:            nextjsOnly("NEXT_PUBLIC_SUPABASE_URL"),
+    // Safe for browser — public Supabase project URL.
+    // On Railway, NEXT_PUBLIC_SUPABASE_URL is not normally set; fall back to
+    // plain SUPABASE_URL so the admin client gets a real URL in the worker.
+    url:            process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? "",
     // Safe for browser — anon (row-level-security) key
     anonKey:        nextjsOnly("NEXT_PUBLIC_SUPABASE_ANON_KEY"),
     // SERVER ONLY — bypasses RLS; never expose to the browser

@@ -10,7 +10,10 @@
  * crashing mid-job with a cryptic undefined error.
  */
 
-// The four environment variables the worker actually needs.
+// The environment variables the worker actually needs.
+// SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL) must be present so createAdminClient()
+// gets a real URL — on Railway, NEXT_PUBLIC_* vars are not automatically available,
+// so set plain SUPABASE_URL in the Railway service environment settings.
 const REQUIRED: readonly string[] = [
   "SUPABASE_SERVICE_ROLE_KEY",
   "ANTHROPIC_API_KEY",
@@ -32,6 +35,18 @@ export function validateWorkerConfig(): void {
         `\n\nSet these variables in the Railway service environment settings.`
     );
   }
+
+  // Supabase URL check — must have at least one of these so createAdminClient()
+  // gets a real URL. On Railway set SUPABASE_URL (same value as your project URL).
+  const supabaseUrl =
+    process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? "";
+  if (!supabaseUrl) {
+    throw new Error(
+      `[worker] Missing Supabase URL. ` +
+        `Set SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL) in the Railway service environment settings. ` +
+        `Value should be your Supabase project URL, e.g. https://xxxx.supabase.co`
+    );
+  }
 }
 
 /**
@@ -40,6 +55,7 @@ export function validateWorkerConfig(): void {
  */
 export const workerConfig = {
   supabase: {
+    url:            process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? "",
     serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? "",
   },
   anthropic: {

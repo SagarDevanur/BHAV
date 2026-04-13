@@ -221,6 +221,17 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
   const payload   = input.payload ?? {};
   const companyId = input.companyId ?? String(payload.companyId ?? "");
 
+  // ------------------------------------------------------------------
+  // Startup diagnostics — printed to Railway logs on every run
+  // ------------------------------------------------------------------
+  console.log("[CFO agent] ── START ──────────────────────────────────────");
+  console.log("[CFO agent] taskId         :", input.taskId);
+  console.log("[CFO agent] input.companyId:", input.companyId ?? "(not set)");
+  console.log("[CFO agent] payload.companyId:", String(payload.companyId ?? "(not set)"));
+  console.log("[CFO agent] resolved companyId:", companyId || "(EMPTY — will throw)");
+  console.log("[CFO agent] supabase URL   :", process.env.NEXT_PUBLIC_SUPABASE_URL ?? "(NOT SET — DB calls will fail)");
+  console.log("[CFO agent] service key set:", Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY));
+
   if (!companyId) throw new Error("CFO agent requires a companyId");
 
   // ------------------------------------------------------------------
@@ -300,26 +311,40 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     const responseText = message.content[0].text;
     const modelUsed    = config.anthropic.model;
 
+    // Log raw response so we can see exactly what Claude returned
+    console.log("[CFO agent] raw Claude response (first 600 chars):");
+    console.log(responseText.slice(0, 600));
+
     // Strip markdown code fences — Claude sometimes wraps JSON in ```json ... ```
     const jsonText = responseText
       .replace(/```json\n?/g, "")
       .replace(/```\n?/g, "")
       .trim();
 
+    console.log("[CFO agent] cleaned JSON (first 400 chars):");
+    console.log(jsonText.slice(0, 400));
+
     let parsed: LlmCfoResponse;
     try {
       parsed = validateLlmResponse(JSON.parse(jsonText));
-    } catch {
+    } catch (parseErr) {
+      console.error("[CFO agent] JSON parse/validate failed:", parseErr);
       throw new Error(
         `CFO agent received invalid JSON from ${modelUsed}: ${jsonText.slice(0, 400)}`
       );
     }
+
+    console.log("[CFO agent] parsed score   :", parsed.despac_score);
+    console.log("[CFO agent] recommendation :", parsed.recommendation);
+    console.log("[CFO agent] confidence     :", parsed.confidence);
 
     // ------------------------------------------------------------------
     // 6. Update companies.despac_score
     // NOTE: Supabase .update().eq() never errors when zero rows match —
     // it silently succeeds. We add .select("id") to detect that case.
     // ------------------------------------------------------------------
+    console.log(`[CFO agent] updating companies SET despac_score=${parsed.despac_score} WHERE id=${companyId}`);
+
     const { data: updatedRows, error: scoreUpdateError } = await supabase
       .from("companies")
       .update({
@@ -330,6 +355,9 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
       .eq("id", companyId)
       .select("id");
 
+    console.log("[CFO agent] Supabase update result — error  :", scoreUpdateError ?? "none");
+    console.log("[CFO agent] Supabase update result — rows   :", JSON.stringify(updatedRows));
+
     if (scoreUpdateError) {
       throw new Error(
         `[CFO agent] Supabase error updating companies for ${companyId}: ${scoreUpdateError.message}`
@@ -338,13 +366,14 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
 
     if (!updatedRows || updatedRows.length === 0) {
       throw new Error(
-        `[CFO agent] companies UPDATE matched 0 rows — companyId "${companyId}" not found in companies table. ` +
-        `Check that input.companyId is a valid UUID that exists in the database.`
+        `[CFO agent] companies UPDATE matched 0 rows — companyId "${companyId}" not found. ` +
+        `Supabase URL in use: ${process.env.NEXT_PUBLIC_SUPABASE_URL ?? "(NOT SET)"}. ` +
+        `Verify this companyId exists in the companies table.`
       );
     }
 
     console.log(
-      `[CFO agent] ✓ companies.despac_score = ${parsed.despac_score}, status = "reviewed" for company ${companyId}`
+      `[CFO agent] ✓ companies.despac_score = ${parsed.despac_score}, status = "reviewed" for ${companyId}`
     );
 
     // ------------------------------------------------------------------
