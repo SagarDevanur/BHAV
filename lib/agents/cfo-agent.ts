@@ -224,8 +224,8 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     // instructed not to (e.g. ```json\n{...}\n```). Strip them before parsing
     // so this doesn't silently cause every task to fail.
     const jsonText = responseText
-      .replace(/^```(?:json)?\s*/i, "")
-      .replace(/\s*```\s*$/i, "")
+      .replace(/```json\n?/g, "")
+      .replace(/```\n?/g, "")
       .trim();
 
     let parsed: LlmCfoResponse;

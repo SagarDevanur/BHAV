@@ -271,8 +271,8 @@ async function scoreOneCompany(
   const modelUsed    = config.anthropic.model;
 
   const jsonText = responseText
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```\s*$/i, "")
+    .replace(/```json\n?/g, "")
+    .replace(/```\n?/g, "")
     .trim();
 
   const parsed = validateLlmResponse(JSON.parse(jsonText), company.id);

@@ -313,10 +313,11 @@ async function callLlm(
   const responseText = message.content[0].text;
   const modelUsed    = config.anthropic.model;
 
-  // Strip markdown code fences if the model wrapped its response
+  // Strip markdown code fences — Claude sometimes wraps JSON in ```json ... ```
+  // even when instructed not to. The /g flag handles fences anywhere in the string.
   const jsonText = responseText
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```\s*$/, "")
+    .replace(/```json\n?/g, "")
+    .replace(/```\n?/g, "")
     .trim();
 
   let parsed: LlmPipeResponse;

@@ -353,8 +353,8 @@ async function extractCompaniesWithLlm(
 
   // Strip markdown code fences Claude sometimes wraps around JSON output
   const jsonText = responseText
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```\s*$/i, "")
+    .replace(/```json\n?/g, "")
+    .replace(/```\n?/g, "")
     .trim();
 
   // Parse and validate — tolerate partial responses
