@@ -270,7 +270,12 @@ async function scoreOneCompany(
   const responseText = message.content[0].text;
   const modelUsed    = config.anthropic.model;
 
-  const parsed = validateLlmResponse(JSON.parse(responseText), company.id);
+  const jsonText = responseText
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/i, "")
+    .trim();
+
+  const parsed = validateLlmResponse(JSON.parse(jsonText), company.id);
   return { parsed, modelUsed };
 }
 

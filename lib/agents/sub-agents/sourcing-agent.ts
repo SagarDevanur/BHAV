@@ -351,10 +351,16 @@ async function extractCompaniesWithLlm(
   const responseText = message.content[0].text;
   const modelUsed    = config.anthropic.model;
 
+  // Strip markdown code fences Claude sometimes wraps around JSON output
+  const jsonText = responseText
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/i, "")
+    .trim();
+
   // Parse and validate — tolerate partial responses
   let parsed: LlmSourcingResponse;
   try {
-    const raw = JSON.parse(responseText) as Record<string, unknown>;
+    const raw = JSON.parse(jsonText) as Record<string, unknown>;
     parsed = {
       companies:     Array.isArray(raw.companies) ? (raw.companies as LlmCompany[]) : [],
       searchSummary: String(raw.searchSummary ?? ""),

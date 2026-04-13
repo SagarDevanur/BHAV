@@ -272,12 +272,18 @@ async function callLlm(
   const responseText = message.content[0].text;
   const modelUsed    = config.anthropic.model;
 
+  // Strip markdown code fences Claude sometimes wraps around JSON output
+  const jsonText = responseText
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/i, "")
+    .trim();
+
   let parsed: LlmOutreachResponse;
   try {
-    parsed = validateLlmResponse(JSON.parse(responseText), company.id);
+    parsed = validateLlmResponse(JSON.parse(jsonText), company.id);
   } catch {
     throw new Error(
-      `Outreach agent received invalid JSON from ${modelUsed}: ${responseText.slice(0, 400)}`
+      `Outreach agent received invalid JSON from ${modelUsed}: ${jsonText.slice(0, 400)}`
     );
   }
 

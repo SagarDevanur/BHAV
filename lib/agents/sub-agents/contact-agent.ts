@@ -322,9 +322,15 @@ async function extractContactsWithLlm(
   const responseText = message.content[0].text;
   const modelUsed    = config.anthropic.model;
 
+  // Strip markdown code fences Claude sometimes wraps around JSON output
+  const jsonText = responseText
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/i, "")
+    .trim();
+
   let parsed: LlmContactResponse;
   try {
-    const raw = JSON.parse(responseText) as Record<string, unknown>;
+    const raw = JSON.parse(jsonText) as Record<string, unknown>;
     parsed = {
       companyId:         String(raw.companyId ?? companyId),
       contacts:          Array.isArray(raw.contacts)

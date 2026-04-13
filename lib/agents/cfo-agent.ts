@@ -220,12 +220,20 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     // ------------------------------------------------------------------
     // 3. Parse and validate
     // ------------------------------------------------------------------
+    // Claude frequently wraps JSON output in markdown code fences even when
+    // instructed not to (e.g. ```json\n{...}\n```). Strip them before parsing
+    // so this doesn't silently cause every task to fail.
+    const jsonText = responseText
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```\s*$/i, "")
+      .trim();
+
     let parsed: LlmCfoResponse;
     try {
-      parsed = validateLlmResponse(JSON.parse(responseText));
+      parsed = validateLlmResponse(JSON.parse(jsonText));
     } catch {
       throw new Error(
-        `CFO agent received invalid JSON from ${modelUsed}: ${responseText.slice(0, 400)}`
+        `CFO agent received invalid JSON from ${modelUsed}: ${jsonText.slice(0, 400)}`
       );
     }
 
@@ -236,7 +244,7 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
       .from("companies")
       .update({
         despac_score: parsed.despac_score,
-        status: "scoring",
+        status: "reviewed",
         updated_at: new Date().toISOString(),
       })
       .eq("id", companyId);
