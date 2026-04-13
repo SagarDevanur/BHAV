@@ -16,7 +16,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import type { AgentInput } from "@/types/agents";
 
 // ---------------------------------------------------------------------------
-// LLM clients
+// LLM client
 // ---------------------------------------------------------------------------
 
 const anthropic = new Anthropic({ apiKey: config.anthropic.apiKey });
@@ -130,16 +130,16 @@ function validateLlmResponse(raw: unknown): LlmCfoResponse {
     companyId: String(r.companyId ?? ""),
     despac_score: Math.round(score),
     score_breakdown: {
-      revenue_fit: Number(breakdown.revenue_fit ?? 0),
-      valuation_band: Number(breakdown.valuation_band ?? 0),
+      revenue_fit:      Number(breakdown.revenue_fit      ?? 0),
+      valuation_band:   Number(breakdown.valuation_band   ?? 0),
       sector_alignment: Number(breakdown.sector_alignment ?? 0),
-      redemption_risk: Number(breakdown.redemption_risk ?? 0),
+      redemption_risk:  Number(breakdown.redemption_risk  ?? 0),
     },
     rationale: {
-      revenue_fit: String(rationale.revenue_fit ?? ""),
-      valuation_band: String(rationale.valuation_band ?? ""),
+      revenue_fit:      String(rationale.revenue_fit      ?? ""),
+      valuation_band:   String(rationale.valuation_band   ?? ""),
       sector_alignment: String(rationale.sector_alignment ?? ""),
-      redemption_risk: String(rationale.redemption_risk ?? ""),
+      redemption_risk:  String(rationale.redemption_risk  ?? ""),
     },
     recommendation: r.recommendation as "approve" | "review" | "reject",
     confidence,
@@ -153,18 +153,15 @@ function validateLlmResponse(raw: unknown): LlmCfoResponse {
 /**
  * Runs the CFO agent against a company record.
  *
- * Accepts AgentInput so it is compatible with the BullMQ worker dispatch
- * pattern. Company fields are expected in input.payload; the API route
- * builds the correct payload shape before calling this function.
- *
  * Flow:
  *   1. Mark agent_tasks row as running.
- *   2. Call Claude (claude-sonnet-4-20250514); fall back to OpenAI gpt-4o on failure.
- *   3. Parse and validate the structured JSON response.
- *   4. Update companies.despac_score in Supabase.
- *   5. Write a scored row to agent_results.
- *   6. Mark agent_tasks row as completed (or failed on any error).
- *   7. Return the structured CfoRunResult.
+ *   2. Fetch any prior sourcing agent_results for this company (EDGAR / news data).
+ *   3. Build enriched prompt combining company fields + sourcing intel.
+ *   4. Call Claude and parse the structured JSON response.
+ *   5. Update companies.despac_score in Supabase.
+ *   6. Write a scored row to agent_results.
+ *   7. Mark agent_tasks row as completed (or failed on any error).
+ *   8. Return the structured CfoRunResult.
  *
  * @param input - AgentInput with company fields in payload and companyId set
  * @returns     CfoRunResult with score, breakdown, recommendation, and reasoning
@@ -172,7 +169,7 @@ function validateLlmResponse(raw: unknown): LlmCfoResponse {
  */
 export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
   const supabase = createAdminClient();
-  const payload = input.payload ?? {};
+  const payload  = input.payload ?? {};
   const companyId = input.companyId ?? String(payload.companyId ?? "");
 
   if (!companyId) {
@@ -189,25 +186,45 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
 
   try {
     // ------------------------------------------------------------------
-    // 2. Call Claude
+    // 2. Fetch prior sourcing intel for this company (non-fatal if absent)
+    // ------------------------------------------------------------------
+    const { data: sourcingResults } = await supabase
+      .from("agent_results")
+      .select("content")
+      .eq("company_id", companyId)
+      .eq("result_type", "sourcing")
+      .order("created_at", { ascending: false })
+      .limit(3);
+
+    // Collect any structured data the sourcing agent stored (EDGAR filings,
+    // news mentions, revenue signals, etc.) so Claude has richer context.
+    const sourcingIntel: unknown[] = (sourcingResults ?? []).map((r) => r.content);
+
+    // ------------------------------------------------------------------
+    // 3. Build enriched user message
     // ------------------------------------------------------------------
     const userMessage = JSON.stringify({
       companyId,
-      name: payload.name ?? null,
-      sector: payload.sector ?? null,
-      sub_sector: payload.sub_sector ?? null,
-      estimated_revenue: payload.estimated_revenue ?? null,
+      name:                payload.name                ?? null,
+      sector:              payload.sector              ?? null,
+      sub_sector:          payload.sub_sector          ?? null,
+      estimated_revenue:   payload.estimated_revenue   ?? null,
       estimated_valuation: payload.estimated_valuation ?? null,
-      last_round: payload.last_round ?? null,
-      blurb: payload.blurb ?? null,
-      approvedByHuman: input.approvedByHuman ?? false,
+      last_round:          payload.last_round          ?? null,
+      blurb:               payload.blurb               ?? null,
+      approvedByHuman:     input.approvedByHuman       ?? false,
+      // Additional context from prior sourcing agent runs
+      sourcing_intel: sourcingIntel.length > 0 ? sourcingIntel : null,
     });
 
+    // ------------------------------------------------------------------
+    // 4. Call Claude
+    // ------------------------------------------------------------------
     const message = await anthropic.messages.create({
-      model: config.anthropic.model,
+      model:      config.anthropic.model,
       max_tokens: 1024,
-      system: AGENT_PROMPTS.cfo,
-      messages: [{ role: "user", content: userMessage }],
+      system:     AGENT_PROMPTS.cfo,
+      messages:   [{ role: "user", content: userMessage }],
     });
 
     if (message.content[0].type !== "text") {
@@ -215,14 +232,10 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     }
 
     const responseText = message.content[0].text;
-    const modelUsed = config.anthropic.model;
+    const modelUsed    = config.anthropic.model;
 
-    // ------------------------------------------------------------------
-    // 3. Parse and validate
-    // ------------------------------------------------------------------
-    // Claude frequently wraps JSON output in markdown code fences even when
-    // instructed not to (e.g. ```json\n{...}\n```). Strip them before parsing
-    // so this doesn't silently cause every task to fail.
+    // Strip markdown code fences — Claude sometimes wraps JSON in ```json ... ```
+    // even when instructed not to. The /g flag handles fences anywhere in the string.
     const jsonText = responseText
       .replace(/```json\n?/g, "")
       .replace(/```\n?/g, "")
@@ -238,14 +251,14 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     }
 
     // ------------------------------------------------------------------
-    // 4. Update companies.despac_score
+    // 5. Update companies.despac_score
     // ------------------------------------------------------------------
     const { error: scoreUpdateError } = await supabase
       .from("companies")
       .update({
         despac_score: parsed.despac_score,
-        status: "reviewed",
-        updated_at: new Date().toISOString(),
+        status:       "reviewed",
+        updated_at:   new Date().toISOString(),
       })
       .eq("id", companyId);
 
@@ -256,23 +269,23 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     }
 
     // ------------------------------------------------------------------
-    // 5. Write to agent_results
+    // 6. Write to agent_results
     // ------------------------------------------------------------------
     const resultContent: Record<string, unknown> = {
-      despac_score: parsed.despac_score,
+      despac_score:    parsed.despac_score,
       score_breakdown: parsed.score_breakdown,
-      rationale: parsed.rationale,
-      recommendation: parsed.recommendation,
-      confidence: parsed.confidence,
+      rationale:       parsed.rationale,
+      recommendation:  parsed.recommendation,
+      confidence:      parsed.confidence,
       modelUsed,
     };
 
     const { error: resultError } = await supabase.from("agent_results").insert({
-      task_id: input.taskId,
-      company_id: companyId,
-      agent_name: "cfo",
+      task_id:     input.taskId,
+      company_id:  companyId,
+      agent_name:  "cfo",
       result_type: "score",
-      content: resultContent,
+      content:     resultContent,
     });
 
     if (resultError) {
@@ -284,28 +297,28 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     }
 
     // ------------------------------------------------------------------
-    // 6. Mark task completed
+    // 7. Mark task completed
     // ------------------------------------------------------------------
     await supabase
       .from("agent_tasks")
       .update({
-        status: "completed",
-        output: resultContent,
+        status:       "completed",
+        output:       resultContent,
         completed_at: new Date().toISOString(),
       })
       .eq("id", input.taskId);
 
     // ------------------------------------------------------------------
-    // 7. Return structured result
+    // 8. Return structured result
     // ------------------------------------------------------------------
     return {
-      taskId: input.taskId,
+      taskId:          input.taskId,
       companyId,
-      despac_score: parsed.despac_score,
+      despac_score:    parsed.despac_score,
       score_breakdown: parsed.score_breakdown,
-      rationale: parsed.rationale,
-      recommendation: parsed.recommendation,
-      confidence: parsed.confidence,
+      rationale:       parsed.rationale,
+      recommendation:  parsed.recommendation,
+      confidence:      parsed.confidence,
       modelUsed,
     };
   } catch (err) {
@@ -315,7 +328,7 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     await supabase
       .from("agent_tasks")
       .update({
-        status: "failed",
+        status:       "failed",
         error,
         completed_at: new Date().toISOString(),
       })
