@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import type { Company, Contact, AgentResult, CompanyStatus } from "@/types/database";
 import { CompanySidePanel } from "./company-side-panel";
 
@@ -52,6 +53,7 @@ function ScoreBar({ score }: { score: number }) {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function CompaniesView({ initialCompanies }: CompaniesViewProps) {
+  const router = useRouter();
   const [companies, setCompanies]       = useState<CompanyWithContacts[]>(initialCompanies);
   const [searchQuery, setSearchQuery]   = useState("");
   const [sectorFilter, setSectorFilter] = useState<string>("All");
@@ -60,6 +62,20 @@ export function CompaniesView({ initialCompanies }: CompaniesViewProps) {
   const [agentResults, setAgentResults] = useState<AgentResult[]>([]);
   const [loadingResults, setLoadingResults] = useState(false);
   const [updatingIds, setUpdatingIds]   = useState<Set<string>>(new Set());
+
+  // ── Bust the client-side router cache on every mount so navigating away
+  // and back always fetches fresh data from the server ─────────────────────
+  useEffect(() => {
+    router.refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Sync local companies state whenever the server passes fresh props ─────
+  // router.refresh() re-runs the server component; React updates initialCompanies
+  // but useState only uses the initial value — this effect applies the update.
+  useEffect(() => {
+    setCompanies(initialCompanies);
+  }, [initialCompanies]);
 
   // ── Fetch agent results when side panel opens ─────────────────────────────
   useEffect(() => {
