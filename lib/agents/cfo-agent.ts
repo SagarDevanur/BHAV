@@ -98,6 +98,32 @@ interface YcData {
   description: string | null;
 }
 
+interface LinkedInData {
+  /** Employee range as shown on LinkedIn, e.g. "201-500 employees" */
+  employeeRange: string | null;
+  foundingYear: string | null;
+  industry: string | null;
+  description: string | null;
+}
+
+interface CrunchbaseData {
+  /** Total funding summary extracted from page meta, e.g. "$45M" */
+  fundingSummary: string | null;
+  /** Last known funding type, e.g. "Series B" */
+  lastFundingType: string | null;
+  description: string | null;
+}
+
+interface Inc42Data {
+  /** Article titles matching the company from Inc42 search results */
+  articles: Array<{ title: string; date: string | null }>;
+}
+
+interface ProductHuntData {
+  /** Products found for this company on ProductHunt */
+  products: Array<{ name: string; tagline: string | null; votesCount: string | null }>;
+}
+
 interface EdgarPreScreenResult {
   /** true = company has public SEC filings → ineligible for deSPAC */
   isPublic: boolean;
@@ -378,6 +404,317 @@ async function checkYcombinator(companyName: string): Promise<YcData | null> {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: company name → URL slug
+// ---------------------------------------------------------------------------
+
+/**
+ * Converts a company name to a lowercase hyphenated slug suitable for use
+ * in LinkedIn, Crunchbase, and similar URL paths.
+ * e.g. "Acme Corp." → "acme-corp"
+ */
+function toSlug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, "")
+    .trim()
+    .replace(/\s+/g, "-");
+}
+
+// ---------------------------------------------------------------------------
+// Enrichment: LinkedIn company page
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetches the LinkedIn company page and extracts employee range, founding
+ * year, industry, and description from Open Graph meta tags and JSON-LD
+ * structured data rendered server-side.
+ *
+ * Note: LinkedIn's bot-detection (HTTP 999) or login-wall redirect may
+ * prevent data extraction. All fields default to null on any failure.
+ * Uses a 5-second AbortController timeout.
+ */
+async function fetchLinkedInData(companyName: string): Promise<LinkedInData | null> {
+  const controller = new AbortController();
+  const timeoutId  = setTimeout(() => controller.abort(), 5_000);
+
+  try {
+    const slug = toSlug(companyName);
+    const url  = `https://www.linkedin.com/company/${slug}`;
+
+    const res = await fetch(url, {
+      signal:  controller.signal,
+      headers: {
+        "User-Agent":      "Mozilla/5.0 (compatible; BHAV-Research-Bot/1.0)",
+        "Accept":          "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+    });
+
+    // LinkedIn returns 999 for bot requests; treat any non-2xx as no data
+    if (!res.ok) return null;
+
+    const html = await res.text();
+
+    // JSON-LD structured data — LinkedIn renders Organization schema server-side
+    const ldMatch = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+    let ldJson: Record<string, unknown> | null = null;
+    let m: RegExpExecArray | null;
+    while ((m = ldMatch.exec(html)) !== null) {
+      try {
+        const parsed = JSON.parse(m[1]) as Record<string, unknown>;
+        if (parsed["@type"] === "Organization" || parsed["@type"] === "Corporation") {
+          ldJson = parsed;
+          break;
+        }
+      } catch { /* malformed JSON-LD — skip */ }
+    }
+
+    // Employee range — appears in JSON-LD as numberOfEmployees or in og:description
+    const empFromLd = ldJson?.numberOfEmployees;
+    const empRange =
+      typeof empFromLd === "object" && empFromLd !== null
+        ? String((empFromLd as Record<string, unknown>).value ?? "")
+        : typeof empFromLd === "string" || typeof empFromLd === "number"
+        ? String(empFromLd)
+        : (html.match(/\b(\d[\d,]*(?:\s*[-–]\s*\d[\d,]*)?)\s*employees\b/i)?.[1] ?? null);
+
+    // Founding year — from JSON-LD foundingDate or text pattern
+    const foundingRaw = String(ldJson?.foundingDate ?? "");
+    const foundingYear =
+      foundingRaw
+        ? foundingRaw.slice(0, 4)
+        : (html.match(/[Ff]ounded(?:\s+in)?\s+(\d{4})/)?.[1] ?? null);
+
+    // Industry — JSON-LD industry field or text pattern
+    const industry =
+      ldJson?.industry ? String(ldJson.industry) :
+      (html.match(/<dt[^>]*>[Ii]ndustry<\/dt>\s*<dd[^>]*>([^<]+)<\/dd>/)?.[1]?.trim() ?? null);
+
+    // Description — og:description preferred, JSON-LD description fallback
+    const ogDesc =
+      /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i.exec(html)?.[1] ??
+      /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:description["']/i.exec(html)?.[1] ??
+      null;
+    const description = ogDesc ?? (ldJson?.description ? String(ldJson.description) : null);
+
+    if (!empRange && !foundingYear && !industry && !description) return null;
+
+    return {
+      employeeRange: empRange ? String(empRange).trim() : null,
+      foundingYear:  foundingYear ?? null,
+      industry:      industry ?? null,
+      description:   description ? description.slice(0, 300) : null,
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Enrichment: Crunchbase organization page
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetches the Crunchbase organization page and extracts funding summary,
+ * last funding type, and company description from Open Graph meta tags
+ * and page title (server-rendered for SEO).
+ *
+ * Note: Crunchbase is a React SPA; detailed funding tables require JS
+ * rendering. This fetch captures only what Crunchbase renders in HTML
+ * for SEO purposes, primarily the og:description and title.
+ * Uses a 5-second AbortController timeout.
+ */
+async function fetchCrunchbaseData(companyName: string): Promise<CrunchbaseData | null> {
+  const controller = new AbortController();
+  const timeoutId  = setTimeout(() => controller.abort(), 5_000);
+
+  try {
+    const slug = toSlug(companyName);
+    const url  = `https://www.crunchbase.com/organization/${slug}`;
+
+    const res = await fetch(url, {
+      signal:  controller.signal,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; BHAV-Research-Bot/1.0)",
+        "Accept":     "text/html,application/xhtml+xml",
+      },
+    });
+
+    if (!res.ok) return null;
+
+    const html = await res.text();
+
+    // og:description — Crunchbase often includes funding totals here, e.g.
+    // "Total Equity Funding Amount - $45M | Raised a Series B"
+    const ogDesc =
+      /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']{10,})["']/i.exec(html)?.[1] ??
+      /<meta[^>]+content=["']([^"']{10,})["'][^>]+property=["']og:description["']/i.exec(html)?.[1] ??
+      null;
+
+    if (!ogDesc) return null;
+
+    // Extract total funding amount, e.g. "$45M", "$1.2B"
+    const fundingMatch = ogDesc.match(/\$[\d,.]+\s*[MBK]?(?:\s+(?:million|billion))?/i);
+    const fundingSummary = fundingMatch ? fundingMatch[0].trim() : null;
+
+    // Extract last funding type
+    const roundMatch = ogDesc.match(
+      /\b(Series [A-Z]\+?|Seed|Pre-Seed|Series A|Series B|Series C|Series D|Series E|Series F|Venture|Growth Equity|Private Equity|IPO|SPAC|Debt Financing)\b/i
+    );
+    const lastFundingType = roundMatch ? roundMatch[1] : null;
+
+    return {
+      fundingSummary:  fundingSummary,
+      lastFundingType: lastFundingType,
+      description:     ogDesc.slice(0, 300),
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Enrichment: Inc42 search (Indian startup funding news)
+// ---------------------------------------------------------------------------
+
+/**
+ * Searches Inc42 (a leading Indian startup media site) for news articles
+ * mentioning the company. Inc42 is WordPress-based and server-renders search
+ * results, making article titles reliably extractable.
+ *
+ * Useful for identifying Indian startups in FinTech, Physical AI, and EVs
+ * that may not appear in US news sources.
+ * Uses a 5-second AbortController timeout.
+ */
+async function searchInc42(companyName: string): Promise<Inc42Data | null> {
+  const controller = new AbortController();
+  const timeoutId  = setTimeout(() => controller.abort(), 5_000);
+
+  try {
+    const query = encodeURIComponent(companyName);
+    const url   = `https://inc42.com/?s=${query}`;
+
+    const res = await fetch(url, {
+      signal:  controller.signal,
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; BHAV-Research-Bot/1.0)" },
+    });
+
+    if (!res.ok) return null;
+
+    const html = await res.text();
+
+    // WordPress article titles appear in <h2 class="entry-title"> or <h3> within <article> tags
+    const titleRegex = /<(?:h2|h3)[^>]*class=["'][^"']*(?:entry-title|post-title)[^"']*["'][^>]*>\s*<a[^>]*>([^<]+)<\/a>/gi;
+    const articles: Array<{ title: string; date: string | null }> = [];
+
+    // Also try date patterns near each title
+    const dateRegex = /<time[^>]*datetime=["']([^"']+)["']/i;
+
+    let titleMatch: RegExpExecArray | null;
+    while ((titleMatch = titleRegex.exec(html)) !== null && articles.length < 5) {
+      const title = titleMatch[1].trim();
+      // Only include if title mentions the company name (case-insensitive)
+      if (title.toLowerCase().includes(companyName.toLowerCase().split(" ")[0].toLowerCase())) {
+        const dateMatch = dateRegex.exec(html.slice(titleMatch.index, titleMatch.index + 500));
+        articles.push({
+          title,
+          date: dateMatch ? dateMatch[1].slice(0, 10) : null,
+        });
+      }
+    }
+
+    if (articles.length === 0) return null;
+    return { articles };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Enrichment: ProductHunt launch check
+// ---------------------------------------------------------------------------
+
+/**
+ * Searches ProductHunt for products matching the company name.
+ * ProductHunt is a Next.js app that embeds page data in a
+ * <script id="__NEXT_DATA__"> tag — this is parsed to extract product
+ * names, taglines, and vote counts from search results.
+ *
+ * A ProductHunt listing confirms the company is an active private startup
+ * with a consumer/developer-facing product. Recent high-vote products
+ * indicate strong market traction.
+ * Uses a 5-second AbortController timeout.
+ */
+async function searchProductHunt(companyName: string): Promise<ProductHuntData | null> {
+  const controller = new AbortController();
+  const timeoutId  = setTimeout(() => controller.abort(), 5_000);
+
+  try {
+    const query = encodeURIComponent(companyName);
+    const url   = `https://www.producthunt.com/search?q=${query}`;
+
+    const res = await fetch(url, {
+      signal:  controller.signal,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; BHAV-Research-Bot/1.0)",
+        "Accept":     "text/html,application/xhtml+xml",
+      },
+    });
+
+    if (!res.ok) return null;
+
+    const html = await res.text();
+
+    // ProductHunt (Next.js) embeds all page data in __NEXT_DATA__
+    const nextDataMatch = /<script[^>]+id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i.exec(html);
+    if (!nextDataMatch) return null;
+
+    let nextData: Record<string, unknown>;
+    try {
+      nextData = JSON.parse(nextDataMatch[1]) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+
+    // Navigate the Next.js page props tree to find search results
+    // Path varies by PH version; try common locations
+    const pageProps =
+      (nextData?.props as Record<string, unknown> | undefined)?.pageProps as
+        Record<string, unknown> | undefined;
+
+    const posts =
+      (pageProps?.posts as unknown[] | undefined) ??
+      (pageProps?.searchResults as unknown[] | undefined) ??
+      ((pageProps?.data as Record<string, unknown> | undefined)?.posts as unknown[] | undefined) ??
+      [];
+
+    if (!Array.isArray(posts) || posts.length === 0) return null;
+
+    const products = (posts as Record<string, unknown>[])
+      .slice(0, 5)
+      .map((p) => ({
+        name:       String(p.name ?? p.slug ?? ""),
+        tagline:    p.tagline ? String(p.tagline) : null,
+        votesCount: p.votesCount != null ? String(p.votesCount) : null,
+      }))
+      .filter((p) => p.name);
+
+    if (products.length === 0) return null;
+    return { products };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Supabase: fetch company website URL
 // ---------------------------------------------------------------------------
 
@@ -577,10 +914,23 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     // ------------------------------------------------------------------
     // 4. Parallel enrichment + sourcing intel fetch
     // ------------------------------------------------------------------
-    const [websiteResult, newsResult, ycResult, sourcingResult] = await Promise.allSettled([
-      websiteUrl ? fetchWebsiteMeta(websiteUrl) : Promise.resolve(null),
-      companyName ? searchCompanyNews(companyName) : Promise.resolve(null),
-      companyName ? checkYcombinator(companyName) : Promise.resolve(null),
+    const [
+      websiteResult,
+      newsResult,
+      ycResult,
+      linkedinResult,
+      crunchbaseResult,
+      inc42Result,
+      productHuntResult,
+      sourcingResult,
+    ] = await Promise.allSettled([
+      websiteUrl  ? fetchWebsiteMeta(websiteUrl)        : Promise.resolve(null),
+      companyName ? searchCompanyNews(companyName)       : Promise.resolve(null),
+      companyName ? checkYcombinator(companyName)        : Promise.resolve(null),
+      companyName ? fetchLinkedInData(companyName)       : Promise.resolve(null),
+      companyName ? fetchCrunchbaseData(companyName)     : Promise.resolve(null),
+      companyName ? searchInc42(companyName)             : Promise.resolve(null),
+      companyName ? searchProductHunt(companyName)       : Promise.resolve(null),
       supabase
         .from("agent_results")
         .select("content")
@@ -590,17 +940,25 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
         .limit(3),
     ]);
 
-    const websiteMeta  = websiteResult.status === "fulfilled" ? websiteResult.value : null;
-    const newsItems    = newsResult.status    === "fulfilled" ? newsResult.value    : null;
-    const ycData       = ycResult.status      === "fulfilled" ? ycResult.value      : null;
-    const sourcingRows = sourcingResult.status === "fulfilled"
+    const websiteMeta    = websiteResult.status     === "fulfilled" ? websiteResult.value     : null;
+    const newsItems      = newsResult.status        === "fulfilled" ? newsResult.value        : null;
+    const ycData         = ycResult.status          === "fulfilled" ? ycResult.value          : null;
+    const linkedinData   = linkedinResult.status    === "fulfilled" ? linkedinResult.value    : null;
+    const crunchbaseData = crunchbaseResult.status  === "fulfilled" ? crunchbaseResult.value  : null;
+    const inc42Data      = inc42Result.status       === "fulfilled" ? inc42Result.value       : null;
+    const productHuntData = productHuntResult.status === "fulfilled" ? productHuntResult.value : null;
+    const sourcingRows   = sourcingResult.status    === "fulfilled"
       ? (sourcingResult.value.data ?? []).map((r) => r.content)
       : [];
 
-    console.log("[CFO agent] website scraped :", websiteMeta ? "yes" : "no");
-    console.log("[CFO agent] news articles   :", newsItems?.length ?? 0);
-    console.log("[CFO agent] YC backed       :", ycData ? `yes — batch ${ycData.batch}` : "no");
-    console.log("[CFO agent] sourcing intel  :", sourcingRows.length, "row(s)");
+    console.log("[CFO agent] website scraped  :", websiteMeta    ? "yes" : "no");
+    console.log("[CFO agent] news articles    :", newsItems?.length ?? 0);
+    console.log("[CFO agent] YC backed        :", ycData         ? `yes — batch ${ycData.batch}` : "no");
+    console.log("[CFO agent] LinkedIn         :", linkedinData   ? `yes — ${linkedinData.employeeRange ?? "no employee range"}` : "no");
+    console.log("[CFO agent] Crunchbase       :", crunchbaseData ? `yes — ${crunchbaseData.fundingSummary ?? "no funding"}` : "no");
+    console.log("[CFO agent] Inc42 articles   :", inc42Data?.articles.length ?? 0);
+    console.log("[CFO agent] ProductHunt      :", productHuntData ? `yes — ${productHuntData.products.length} product(s)` : "no");
+    console.log("[CFO agent] sourcing intel   :", sourcingRows.length, "row(s)");
 
     // ------------------------------------------------------------------
     // 5. Build enriched user message
@@ -616,14 +974,22 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
       blurb:               payload.blurb               ?? null,
       approvedByHuman:     input.approvedByHuman       ?? false,
       // Enrichment: website signals
-      website_meta: websiteMeta ?? null,
+      website_meta:     websiteMeta ?? null,
       // Enrichment: recent news about this company
-      news_intel: newsItems && newsItems.length > 0 ? newsItems : null,
+      news_intel:       newsItems && newsItems.length > 0 ? newsItems : null,
       // Enrichment: YC backing
-      yc_backed: ycData !== null,
-      yc_data:   ycData ?? null,
+      yc_backed:        ycData !== null,
+      yc_data:          ycData ?? null,
+      // Enrichment: LinkedIn company page (employee range, founding year, industry)
+      linkedin_data:    linkedinData ?? null,
+      // Enrichment: Crunchbase organization page (funding summary, last round type)
+      crunchbase_data:  crunchbaseData ?? null,
+      // Enrichment: Inc42 search results (Indian startup funding news)
+      inc42_articles:   inc42Data && inc42Data.articles.length > 0 ? inc42Data.articles : null,
+      // Enrichment: ProductHunt launches (confirms active private startup with product)
+      producthunt_data: productHuntData ?? null,
       // Prior sourcing agent context
-      sourcing_intel: sourcingRows.length > 0 ? sourcingRows : null,
+      sourcing_intel:   sourcingRows.length > 0 ? sourcingRows : null,
     });
 
     // ------------------------------------------------------------------
@@ -707,15 +1073,19 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     // 8. Write to agent_results
     // ------------------------------------------------------------------
     const resultContent: Record<string, unknown> = {
-      despac_score:       parsed.despac_score,
-      score_breakdown:    parsed.score_breakdown,
-      rationale:          parsed.rationale,
-      recommendation:     parsed.recommendation,
-      confidence:         parsed.confidence,
-      yc_backed:          ycData !== null,
-      yc_batch:           ycData?.batch ?? null,
-      news_articles_used: newsItems?.length ?? 0,
-      website_scraped:    websiteMeta !== null,
+      despac_score:          parsed.despac_score,
+      score_breakdown:       parsed.score_breakdown,
+      rationale:             parsed.rationale,
+      recommendation:        parsed.recommendation,
+      confidence:            parsed.confidence,
+      yc_backed:             ycData !== null,
+      yc_batch:              ycData?.batch ?? null,
+      news_articles_used:    newsItems?.length ?? 0,
+      website_scraped:       websiteMeta !== null,
+      linkedin_scraped:      linkedinData !== null,
+      crunchbase_scraped:    crunchbaseData !== null,
+      inc42_articles_found:  inc42Data?.articles.length ?? 0,
+      producthunt_found:     productHuntData !== null,
       modelUsed,
     };
 

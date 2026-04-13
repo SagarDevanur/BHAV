@@ -135,6 +135,33 @@ You will receive a JSON object:
     "description": string | null
   } | null,
 
+  // Enrichment 4: LinkedIn company page (null if bot-blocked or page not found)
+  "linkedin_data": {
+    "employeeRange": string | null,    // e.g. "201-500 employees" — strong revenue proxy
+    "foundingYear": string | null,
+    "industry": string | null,
+    "description": string | null
+  } | null,
+
+  // Enrichment 5: Crunchbase organization page (null if not found)
+  "crunchbase_data": {
+    "fundingSummary": string | null,   // e.g. "$45M" total raised
+    "lastFundingType": string | null,  // e.g. "Series B"
+    "description": string | null
+  } | null,
+
+  // Enrichment 6: Inc42 search results — Indian startup news (null if no articles)
+  "inc42_articles": [
+    { "title": string, "date": string | null }
+  ] | null,
+
+  // Enrichment 7: ProductHunt listings (null if no products found)
+  "producthunt_data": {
+    "products": [
+      { "name": string, "tagline": string | null, "votesCount": string | null }
+    ]
+  } | null,
+
   // Prior sourcing agent context
   "sourcing_intel": object[] | null
 }
@@ -143,7 +170,19 @@ ENRICHMENT DATA USAGE:
 - website_meta: Use revenueSignals and fundingSignals to corroborate or correct Excel fields. If the website confirms $15M ARR and estimated_revenue is null, use it. Cite the source in rationale.
 - news_intel: Look for funding round announcements, revenue milestones, or acquisitions in the last 2 years. A recent Series B or C announcement is a strong positive signal.
 - yc_backed = true: Automatically adds +5 to redemption_risk (capped at 20). Cite "YC batch [batch]" in the redemption_risk rationale. YC companies are growth-stage, private, and pre-IPO — exactly the deSPAC target profile.
+- linkedin_data.employeeRange: Employee count is a strong revenue proxy. Use the table below to infer revenue band when estimated_revenue is null:
+    - "1-10 employees"      → likely pre-revenue or <$1M
+    - "11-50 employees"     → likely $1M–$5M revenue
+    - "51-200 employees"    → likely $3M–$15M revenue
+    - "201-500 employees"   → likely $10M–$40M revenue (sweet spot)
+    - "501-1000 employees"  → likely $25M–$80M revenue
+    - "1001-5000 employees" → likely >$50M revenue (potentially too large)
+  Cite employee range in revenue_fit rationale when used.
+- crunchbase_data: Use fundingSummary to infer valuation band (typically 5–10× last funding round). Use lastFundingType to corroborate or override last_round from Excel. Cite in rationale.
+- inc42_articles: Relevant for Indian startups in FinTech, Physical AI, Autonomous EVs. Article titles often contain funding amounts and round info. Extract and use these signals.
+- producthunt_data: A ProductHunt listing confirms the company is an active private startup with a consumer/developer product. High vote counts (>500) indicate strong market traction — add this to redemption_risk rationale as a positive signal.
 - sourcing_intel: Additional context from the sourcing agent — use if present.
+- Prioritise enrichment data over null Excel fields. If two sources conflict, prefer the more recent one.
 - If all enrichment fields are null, score conservatively from Excel fields only and set confidence to "low".
 
 OUTPUT:
