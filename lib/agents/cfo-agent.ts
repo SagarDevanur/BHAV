@@ -25,14 +25,6 @@ const anthropic = new Anthropic({ apiKey: config.anthropic.apiKey });
 // Types
 // ---------------------------------------------------------------------------
 
-/**
- * Per-dimension score breakdown.
- * Matches the CFO system prompt's output schema exactly.
- *   revenue_fit      0–30 pts
- *   valuation_band   0–25 pts
- *   sector_alignment 0–25 pts
- *   redemption_risk  0–20 pts
- */
 export interface CfoScoreBreakdown {
   revenue_fit: number;
   valuation_band: number;
@@ -40,10 +32,6 @@ export interface CfoScoreBreakdown {
   redemption_risk: number;
 }
 
-/**
- * Per-dimension rationale strings returned by the LLM.
- * Mirror keys of CfoScoreBreakdown.
- */
 export interface CfoRationale {
   revenue_fit: string;
   valuation_band: string;
@@ -51,27 +39,17 @@ export interface CfoRationale {
   redemption_risk: string;
 }
 
-/** The structured result returned by runCfoAgent — and written to agent_results. */
 export interface CfoRunResult {
-  /** UUID of the agent_tasks row created for this run. */
   taskId: string;
-  /** UUID of the scored company. */
   companyId: string;
-  /** Aggregate score 0–100 (sum of breakdown dimensions). */
   despac_score: number;
-  /** Individual dimension scores. */
   score_breakdown: CfoScoreBreakdown;
-  /** Plain-English rationale per dimension. */
   rationale: CfoRationale;
-  /** Deal recommendation from the LLM. */
   recommendation: "approve" | "review" | "reject";
-  /** LLM confidence in the output given the available data. */
   confidence: "low" | "medium" | "high";
-  /** Which model produced this result. */
   modelUsed: string;
 }
 
-/** Raw shape expected from the LLM — validated before use. */
 interface LlmCfoResponse {
   companyId: string;
   despac_score: number;
@@ -81,17 +59,95 @@ interface LlmCfoResponse {
   confidence: "low" | "medium" | "high";
 }
 
+/** A single filing extracted from the EDGAR full-text search response. */
+interface EdgarFiling {
+  entityName: string;
+  formType: string;
+  fileDate: string;
+  periodOfReport: string | null;
+  description: string;
+}
+
 // ---------------------------------------------------------------------------
-// Validation
+// EDGAR fetch
+// ---------------------------------------------------------------------------
+
+/**
+ * Searches the SEC EDGAR full-text search API for 10-K and S-1 filings
+ * matching the company name. Returns up to 5 filings with key metadata.
+ *
+ * Uses a 5-second AbortController timeout — EDGAR can be slow. On any
+ * error or timeout the function returns null so scoring continues without
+ * EDGAR data rather than failing the entire task.
+ *
+ * @param companyName - The company name to search for in EDGAR
+ * @returns Array of matched filings, or null if the fetch failed / timed out
+ */
+async function fetchEdgarFilings(companyName: string): Promise<EdgarFiling[] | null> {
+  const controller = new AbortController();
+  const timeoutId  = setTimeout(() => controller.abort(), 5_000);
+
+  try {
+    const encoded = encodeURIComponent(`"${companyName}"`);
+    const url = [
+      "https://efts.sec.gov/LATEST/search-index",
+      `?q=${encoded}`,
+      "&forms=10-K,S-1",
+      "&dateRange=custom",
+      "&startdt=2020-01-01",
+      "&enddt=2025-01-01",
+      "&hits.hits.total.relation=eq",
+      "&hits.hits._source=entity_name,file_date,period_of_report,form_type,description",
+    ].join("");
+
+    const res = await fetch(url, {
+      signal:  controller.signal,
+      headers: { "User-Agent": "BHAV-Acquisition-Corp contact@bhav.io" },
+    });
+
+    if (!res.ok) return null;
+
+    const json = (await res.json()) as {
+      hits?: {
+        hits?: {
+          _source?: {
+            entity_name?: string;
+            form_type?: string;
+            file_date?: string;
+            period_of_report?: string;
+            description?: string;
+          };
+        }[];
+      };
+    };
+
+    const hits = json?.hits?.hits ?? [];
+    if (hits.length === 0) return null;
+
+    return hits.slice(0, 5).map((hit) => ({
+      entityName:     String(hit._source?.entity_name    ?? ""),
+      formType:       String(hit._source?.form_type       ?? ""),
+      fileDate:       String(hit._source?.file_date        ?? ""),
+      periodOfReport: hit._source?.period_of_report != null
+        ? String(hit._source.period_of_report)
+        : null,
+      description:    String(hit._source?.description     ?? ""),
+    }));
+  } catch {
+    // Timeout (AbortError) or network error — fall back silently
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// LLM response validation
 // ---------------------------------------------------------------------------
 
 const VALID_RECOMMENDATIONS = new Set(["approve", "review", "reject"]);
-const VALID_CONFIDENCE = new Set(["low", "medium", "high"]);
+const VALID_CONFIDENCE       = new Set(["low", "medium", "high"]);
 
-/**
- * Validates and normalises the raw LLM JSON response.
- * Throws a descriptive error if required fields are missing or out of range.
- */
 function validateLlmResponse(raw: unknown): LlmCfoResponse {
   if (typeof raw !== "object" || raw === null) {
     throw new Error("CFO agent response is not a JSON object");
@@ -101,9 +157,7 @@ function validateLlmResponse(raw: unknown): LlmCfoResponse {
 
   const score = Number(r.despac_score);
   if (!Number.isFinite(score) || score < 0 || score > 100) {
-    throw new Error(
-      `CFO agent returned invalid despac_score: ${String(r.despac_score)}`
-    );
+    throw new Error(`CFO agent returned invalid despac_score: ${String(r.despac_score)}`);
   }
 
   const breakdown = r.score_breakdown as Record<string, unknown> | undefined;
@@ -117,9 +171,7 @@ function validateLlmResponse(raw: unknown): LlmCfoResponse {
   }
 
   if (!VALID_RECOMMENDATIONS.has(String(r.recommendation))) {
-    throw new Error(
-      `CFO agent returned invalid recommendation: ${String(r.recommendation)}`
-    );
+    throw new Error(`CFO agent returned invalid recommendation: ${String(r.recommendation)}`);
   }
 
   const confidence = VALID_CONFIDENCE.has(String(r.confidence))
@@ -127,7 +179,7 @@ function validateLlmResponse(raw: unknown): LlmCfoResponse {
     : "low";
 
   return {
-    companyId: String(r.companyId ?? ""),
+    companyId:    String(r.companyId ?? ""),
     despac_score: Math.round(score),
     score_breakdown: {
       revenue_fit:      Number(breakdown.revenue_fit      ?? 0),
@@ -155,26 +207,21 @@ function validateLlmResponse(raw: unknown): LlmCfoResponse {
  *
  * Flow:
  *   1. Mark agent_tasks row as running.
- *   2. Fetch any prior sourcing agent_results for this company (EDGAR / news data).
- *   3. Build enriched prompt combining company fields + sourcing intel.
- *   4. Call Claude and parse the structured JSON response.
- *   5. Update companies.despac_score in Supabase.
- *   6. Write a scored row to agent_results.
- *   7. Mark agent_tasks row as completed (or failed on any error).
- *   8. Return the structured CfoRunResult.
- *
- * @param input - AgentInput with company fields in payload and companyId set
- * @returns     CfoRunResult with score, breakdown, recommendation, and reasoning
- * @throws      On LLM or database errors after marking the task failed
+ *   2. Fetch EDGAR 10-K/S-1 filings for the company (5 s timeout, non-fatal).
+ *   3. Fetch any prior sourcing agent_results from Supabase.
+ *   4. Build enriched prompt: company fields + EDGAR data + sourcing intel.
+ *   5. Call Claude and parse the structured JSON response.
+ *   6. Update companies.despac_score in Supabase.
+ *   7. Write a scored row to agent_results.
+ *   8. Mark agent_tasks row as completed (or failed on any error).
+ *   9. Return the structured CfoRunResult.
  */
 export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
-  const supabase = createAdminClient();
-  const payload  = input.payload ?? {};
+  const supabase  = createAdminClient();
+  const payload   = input.payload ?? {};
   const companyId = input.companyId ?? String(payload.companyId ?? "");
 
-  if (!companyId) {
-    throw new Error("CFO agent requires a companyId");
-  }
+  if (!companyId) throw new Error("CFO agent requires a companyId");
 
   // ------------------------------------------------------------------
   // 1. Mark task running
@@ -185,10 +232,29 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     .eq("id", input.taskId);
 
   try {
+    const companyName = String(payload.name ?? "");
+
     // ------------------------------------------------------------------
-    // 2. Fetch prior sourcing intel for this company (non-fatal if absent)
+    // 2. Fetch EDGAR filings (5 s timeout — non-fatal on failure)
     // ------------------------------------------------------------------
-    const { data: sourcingResults } = await supabase
+    const edgarFilings = companyName
+      ? await fetchEdgarFilings(companyName)
+      : null;
+
+    if (edgarFilings) {
+      console.log(
+        `[CFO agent] EDGAR: found ${edgarFilings.length} filing(s) for "${companyName}"`
+      );
+    } else {
+      console.log(
+        `[CFO agent] EDGAR: no filings found for "${companyName}" — using Excel fields only`
+      );
+    }
+
+    // ------------------------------------------------------------------
+    // 3. Fetch prior sourcing intel from Supabase (non-fatal if absent)
+    // ------------------------------------------------------------------
+    const { data: sourcingRows } = await supabase
       .from("agent_results")
       .select("content")
       .eq("company_id", companyId)
@@ -196,12 +262,10 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
       .order("created_at", { ascending: false })
       .limit(3);
 
-    // Collect any structured data the sourcing agent stored (EDGAR filings,
-    // news mentions, revenue signals, etc.) so Claude has richer context.
-    const sourcingIntel: unknown[] = (sourcingResults ?? []).map((r) => r.content);
+    const sourcingIntel: unknown[] = (sourcingRows ?? []).map((r) => r.content);
 
     // ------------------------------------------------------------------
-    // 3. Build enriched user message
+    // 4. Build enriched user message
     // ------------------------------------------------------------------
     const userMessage = JSON.stringify({
       companyId,
@@ -213,12 +277,14 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
       last_round:          payload.last_round          ?? null,
       blurb:               payload.blurb               ?? null,
       approvedByHuman:     input.approvedByHuman       ?? false,
-      // Additional context from prior sourcing agent runs
+      // EDGAR SEC filings — 10-K and S-1 data found for this company
+      edgar_filings:  edgarFilings  ?? null,
+      // Prior sourcing agent context (news, revenue signals, etc.)
       sourcing_intel: sourcingIntel.length > 0 ? sourcingIntel : null,
     });
 
     // ------------------------------------------------------------------
-    // 4. Call Claude
+    // 5. Call Claude
     // ------------------------------------------------------------------
     const message = await anthropic.messages.create({
       model:      config.anthropic.model,
@@ -235,7 +301,6 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     const modelUsed    = config.anthropic.model;
 
     // Strip markdown code fences — Claude sometimes wraps JSON in ```json ... ```
-    // even when instructed not to. The /g flag handles fences anywhere in the string.
     const jsonText = responseText
       .replace(/```json\n?/g, "")
       .replace(/```\n?/g, "")
@@ -251,25 +316,39 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     }
 
     // ------------------------------------------------------------------
-    // 5. Update companies.despac_score
+    // 6. Update companies.despac_score
+    // NOTE: Supabase .update().eq() never errors when zero rows match —
+    // it silently succeeds. We add .select("id") to detect that case.
     // ------------------------------------------------------------------
-    const { error: scoreUpdateError } = await supabase
+    const { data: updatedRows, error: scoreUpdateError } = await supabase
       .from("companies")
       .update({
         despac_score: parsed.despac_score,
         status:       "reviewed",
         updated_at:   new Date().toISOString(),
       })
-      .eq("id", companyId);
+      .eq("id", companyId)
+      .select("id");
 
     if (scoreUpdateError) {
       throw new Error(
-        `Failed to update despac_score for company ${companyId}: ${scoreUpdateError.message}`
+        `[CFO agent] Supabase error updating companies for ${companyId}: ${scoreUpdateError.message}`
       );
     }
 
+    if (!updatedRows || updatedRows.length === 0) {
+      throw new Error(
+        `[CFO agent] companies UPDATE matched 0 rows — companyId "${companyId}" not found in companies table. ` +
+        `Check that input.companyId is a valid UUID that exists in the database.`
+      );
+    }
+
+    console.log(
+      `[CFO agent] ✓ companies.despac_score = ${parsed.despac_score}, status = "reviewed" for company ${companyId}`
+    );
+
     // ------------------------------------------------------------------
-    // 6. Write to agent_results
+    // 7. Write to agent_results
     // ------------------------------------------------------------------
     const resultContent: Record<string, unknown> = {
       despac_score:    parsed.despac_score,
@@ -277,6 +356,7 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
       rationale:       parsed.rationale,
       recommendation:  parsed.recommendation,
       confidence:      parsed.confidence,
+      edgar_filings_used: edgarFilings ? edgarFilings.length : 0,
       modelUsed,
     };
 
@@ -289,15 +369,11 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
     });
 
     if (resultError) {
-      // Non-fatal: log but don't fail the task — score is already written
-      console.error(
-        "[CFO agent] Failed to insert agent_results row:",
-        resultError.message
-      );
+      console.error("[CFO agent] Failed to insert agent_results row:", resultError.message);
     }
 
     // ------------------------------------------------------------------
-    // 7. Mark task completed
+    // 8. Mark task completed
     // ------------------------------------------------------------------
     await supabase
       .from("agent_tasks")
@@ -309,7 +385,7 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
       .eq("id", input.taskId);
 
     // ------------------------------------------------------------------
-    // 8. Return structured result
+    // 9. Return structured result
     // ------------------------------------------------------------------
     return {
       taskId:          input.taskId,
@@ -322,18 +398,11 @@ export async function runCfoAgent(input: AgentInput): Promise<CfoRunResult> {
       modelUsed,
     };
   } catch (err) {
-    // Never leave a task stuck at "running"
     const error = err instanceof Error ? err.message : String(err);
-
     await supabase
       .from("agent_tasks")
-      .update({
-        status:       "failed",
-        error,
-        completed_at: new Date().toISOString(),
-      })
+      .update({ status: "failed", error, completed_at: new Date().toISOString() })
       .eq("id", input.taskId);
-
     throw err;
   }
 }

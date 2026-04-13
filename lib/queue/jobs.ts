@@ -165,10 +165,21 @@ export const jobOutputSchemas: Record<AgentName, z.ZodTypeAny> = {
   }),
 
   cfo: z.object({
-    financialAssessment: str,
-    revenueEstimate:     z.string(),
-    fitScore:            score100,
-    flags:               z.array(z.string()),
+    despac_score:    score100,
+    score_breakdown: z.object({
+      revenue_fit:      z.number().min(0).max(30),
+      valuation_band:   z.number().min(0).max(25),
+      sector_alignment: z.number().min(0).max(25),
+      redemption_risk:  z.number().min(0).max(20),
+    }),
+    rationale: z.object({
+      revenue_fit:      z.string(),
+      valuation_band:   z.string(),
+      sector_alignment: z.string(),
+      redemption_risk:  z.string(),
+    }),
+    recommendation: z.enum(["approve", "review", "reject"]),
+    confidence:     z.enum(["low", "medium", "high"]),
   }),
 
   master: z.object({

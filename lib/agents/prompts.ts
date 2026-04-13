@@ -106,8 +106,23 @@ You will receive a JSON object:
   "last_round": string | null,
   "blurb": string | null,
   "approvedByHuman": boolean,
-  "sourcing_intel": object[] | null    // Prior sourcing agent data: EDGAR, news, revenue signals
+  "edgar_filings": [                   // SEC EDGAR 10-K and S-1 filings found for this company
+    {
+      "entityName": string,
+      "formType": "10-K" | "S-1",
+      "fileDate": string,              // e.g. "2023-11-15"
+      "periodOfReport": string | null, // fiscal year end or registration date
+      "description": string            // Filing description snippet from EDGAR
+    }
+  ] | null,                            // null = no EDGAR filings found; fall back to Excel fields
+  "sourcing_intel": object[] | null    // Prior sourcing agent data: news, revenue signals
 }
+
+EDGAR DATA USAGE:
+- If edgar_filings is non-null, a 10-K filing confirms the company files with the SEC — it is likely more mature and revenue-generating than its blurb suggests. Adjust revenue_fit and confidence upward.
+- An S-1 filing means the company has pursued or is pursuing a public offering — strong signal of scale.
+- If edgar_filings is null, score conservatively using only the Excel fields provided.
+- Always cite in rationale whether EDGAR data was used (e.g. "10-K filed 2023-11-15 confirms public reporting company").
 
 OUTPUT:
 Return a raw JSON object with no markdown, no prose, no code fences — only the JSON:
