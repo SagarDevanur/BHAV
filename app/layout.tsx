@@ -21,6 +21,9 @@ export default function RootLayout({
       signUpUrl="/sign-up"
       signInFallbackRedirectUrl="/dashboard"
       signUpFallbackRedirectUrl="/dashboard"
+      afterSignOutUrl="/sign-in"
+      // Session lifetime (30 days) is configured in Clerk Dashboard →
+      // Configure → Sessions → Session lifetime. Set to 2592000 seconds.
     >
       <html lang="en">
         <body className={inter.className}>{children}</body>
