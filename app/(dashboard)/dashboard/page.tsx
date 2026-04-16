@@ -1,4 +1,6 @@
 // Deal pipeline — server component fetches initial data, client handles live refresh.
+export const dynamic   = "force-dynamic";
+export const revalidate = 0;
 import { createAdminClient } from "@/lib/supabase/admin";
 import { DealPipeline } from "@/components/dashboard/deal-pipeline";
 import type { Company, AgentTask } from "@/types/database";

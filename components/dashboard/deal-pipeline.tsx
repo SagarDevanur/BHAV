@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useRouter } from "next/navigation";
 import { PromptConsole } from "./PromptConsole";
 import { InfoTooltip } from "@/components/ui/InfoTooltip";
 import type { Company, CompanyStatus, AgentTask } from "@/types/database";
@@ -168,10 +169,18 @@ function KanbanColumn({ label, companies, info }: { label: string; companies: Co
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export function DealPipeline({ initialData }: DealPipelineProps) {
+  const router = useRouter();
   const [data, setData]           = useState<DashboardData>(initialData);
   const [syncing, setSyncing]     = useState(false);
   const [tickerIdx, setTickerIdx] = useState(0);
   const tickerTimer = useRef<ReturnType<typeof setInterval>>();
+
+  // Bust the client-side router cache on mount so navigating back always
+  // fetches fresh data from the server instead of serving a stale RSC payload.
+  useEffect(() => { router.refresh(); }, [router]);
+
+  // Sync fresh server data into state after router.refresh() re-runs the page.
+  useEffect(() => { setData(initialData); }, [initialData]);
 
   // ── Polling ───────────────────────────────────────────────────────────────
   const refresh = useCallback(async () => {
