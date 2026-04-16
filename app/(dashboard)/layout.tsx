@@ -1,6 +1,6 @@
 import { currentUser } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
-import { isEmailAllowed } from "@/lib/auth-config";
+import { isEmailAllowed, isExceptionEmail } from "@/lib/auth-config";
 import { Sidebar } from "@/components/dashboard/sidebar";
 import { UserHeader } from "@/components/dashboard/user-header";
 import { AgentStatusIndicator } from "@/components/dashboard/agent-status-indicator";
@@ -24,9 +24,20 @@ export default async function DashboardLayout({
     user.emailAddresses.find((e) => e.id === user.primaryEmailAddressId)
       ?.emailAddress ?? "";
 
-  // Domain / exception-list check — redirect unauthorized accounts
-  if (!isEmailAllowed(email)) {
-    redirect("/unauthorized");
+  const emailLower = email.toLowerCase().trim();
+
+  // Exception emails (co-founders) are always allowed
+  if (!isExceptionEmail(emailLower)) {
+    if (!isEmailAllowed(emailLower)) {
+      // Not an exception email and not @bhavspac.com — block entirely
+      redirect("/unauthorized");
+    }
+
+    // @bhavspac.com user — must be explicitly approved by an admin
+    const meta = user.publicMetadata as Record<string, unknown>;
+    if (meta.approved !== true) {
+      redirect("/pending-approval");
+    }
   }
 
   return (

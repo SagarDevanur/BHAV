@@ -97,7 +97,15 @@ function VerifyView({
           await setActive({ session: result.createdSessionId });
           router.push("/dashboard");
         } else {
-          // @bhavspac.com users: verify then show success (admin is notified separately)
+          // @bhavspac.com non-exception: mark as pending in Clerk metadata.
+          // Do NOT call setActive() — the user is blocked until an admin approves.
+          if (result.createdUserId) {
+            await fetch("/api/set-pending", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ userId: result.createdUserId }),
+            });
+          }
           setDone(true);
         }
       } else {

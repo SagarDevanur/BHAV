@@ -129,6 +129,15 @@ export const config = {
     // SERVER ONLY — optional. When absent the contact agent skips the Hunter.io step.
     apiKey: process.env.HUNTER_API_KEY,
   },
+  resend: {
+    // SERVER ONLY — Resend API key for transactional emails (approval requests).
+    apiKey: process.env.RESEND_API_KEY,
+  },
+  approval: {
+    // SERVER ONLY — secret used to sign one-click approval tokens in emails.
+    // Must be at least 32 characters. Falls back to CLERK_SECRET_KEY if not set.
+    secret: process.env.APPROVAL_TOKEN_SECRET ?? process.env.CLERK_SECRET_KEY ?? "",
+  },
 } as const;
 
 export type Config = typeof config;
