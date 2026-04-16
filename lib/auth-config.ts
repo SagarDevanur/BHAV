@@ -10,8 +10,8 @@
  */
 
 export const EXCEPTION_EMAILS: readonly string[] = [
-  "sagardevanur@gmail.com",   // co-founder
-  "giri.devanur@gmail.com",   // co-founder
+  "sagardevanur@gmail.com",   // developer
+  "giri.devanur@gmail.com",   // founder
   "chaitanya@bhavspac.com",   // co-founder / admin
 ] as const;
 
